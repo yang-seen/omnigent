@@ -82,29 +82,37 @@ export function forkTargetCarriesHistory(targetHarness: string | null | undefine
 }
 
 /**
- * Strip the `" (fork <id>)"` / `" (switch <id>)"` suffix the fork/switch
- * routes append to an agent's name when cloning it, so a clone can be
- * matched back to the agent it was cloned from by name.
+ * Strip ONE trailing `" (fork <id>)"` / `" (switch <id>)"` suffix.
+ *
+ * Internal one-layer primitive for {@link agentRootName}; not exported,
+ * because a fork of a fork stacks these suffixes and every caller that
+ * matches a clone name back to its origin (built-in catalog, native-label
+ * map, switch-dialog dedup) wants the FULLY rooted name. Reaching for a
+ * single-layer strip is the footgun that lets a multi-fork clone slip the
+ * match — so callers use `agentRootName`, never this.
  *
  * @param name - An agent name, e.g. `"claude-native-ui (fork conv_ab12)"`.
- * @returns The base name, e.g. `"claude-native-ui"`. Names without a
- *   clone suffix are returned unchanged.
+ * @returns The name with one clone suffix removed.
  */
-export function agentBaseName(name: string): string {
+function agentBaseName(name: string): string {
   return name.replace(/ \((?:fork|switch) [^)]+\)$/, "");
 }
 
 /**
- * The base name behind ANY chain of fork/switch clone suffixes.
+ * The root agent name behind ANY chain of fork/switch clone suffixes.
  *
- * {@link agentBaseName} removes a single trailing `(fork <id>)` /
- * `(switch <id>)` layer, but a fork of a fork accumulates them — e.g.
- * `"claude-native-ui (fork ag_a) (fork ag_b)"`. Callers that compare a
- * clone's name against a single-layer catalog (the agent picker dropping
- * session agents that shadow a built-in) must peel EVERY layer, otherwise
- * a multi-layer clone of a built-in strips to `"claude-native-ui (fork
- * ag_a)"`, fails the built-in-name match, and leaks into the picker as a
- * spurious "custom" agent.
+ * The fork/switch routes clone a bound agent as `"<name> (fork <id>)"`, and
+ * a fork of a fork accumulates them — e.g. `"claude-native-ui (fork ag_a)
+ * (fork ag_b)"`. This peels EVERY layer to the root, so a clone (however
+ * deep) still matches the agent it derives from by name.
+ *
+ * Use this for ALL clone-name → catalog matching: the new-session picker
+ * dropping session agents that shadow a built-in (`useAvailableAgents`),
+ * the in-session model-picker / agent-info label (`agentDisplayLabel`), and
+ * the switch-agent dialog excluding the current agent's origin. A
+ * single-layer strip would leave `"claude-native-ui (fork ag_a)"`, miss the
+ * match, and surface the clone as a spurious "custom" agent / duplicate
+ * built-in / raw suffixed label.
  *
  * @param name - An agent name, possibly with nested clone suffixes.
  * @returns The root base name with all clone suffixes removed.
