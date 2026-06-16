@@ -13,7 +13,7 @@ Skipped if tmux is not installed on the host.
 
 Usage::
 
-    pytest tests/e2e/test_journey_terminal_driven_dev.py \
+    pytest tests/e2e/test_journey_terminal_driven_dev.py \\
         --llm-api-key $LLM_API_KEY -v
 """
 
@@ -52,9 +52,9 @@ def _get_function_call_outputs(
     :param tool_name: Only outputs of calls to this tool are returned.
     :returns: Ordered list of raw output strings.
     """
-    resp = client.get(f"/v1/sessions/{session_id}")
+    resp = client.get(f"/v1/sessions/{session_id}/items?limit=200")
     resp.raise_for_status()
-    items = resp.json().get("items", [])
+    items = resp.json()["data"]
 
     calls_by_id: dict[str, dict] = {}
     for item in items:
@@ -74,33 +74,6 @@ def _get_function_call_outputs(
         if itype == "function_call_output" and call_id in calls_by_id:
             outputs.append(str(output or ""))
     return outputs
-
-
-def _get_function_call_args(
-    client: httpx.Client,
-    session_id: str,
-    tool_name: str,
-) -> list[str]:
-    """Return raw arguments of every *tool_name* call in conversation order.
-
-    :param client: HTTP client pointed at the live server.
-    :param session_id: Session/conversation id.
-    :param tool_name: Only arguments of calls to this tool are returned.
-    :returns: Ordered list of raw argument strings.
-    """
-    resp = client.get(f"/v1/sessions/{session_id}")
-    resp.raise_for_status()
-    items = resp.json().get("items", [])
-
-    args_list: list[str] = []
-    for item in items:
-        itype = item.get("type")
-        data = item.get("data") or {}
-        name = item.get("name") or data.get("name")
-        arguments = item.get("arguments") or data.get("arguments")
-        if itype == "function_call" and name == tool_name:
-            args_list.append(str(arguments or ""))
-    return args_list
 
 
 @pytest.mark.llm_flaky(reruns=2)
@@ -211,10 +184,10 @@ def test_terminal_persists_across_turns(
     """Terminal state (tmux session) persists between agent turns.
 
     Turn 1: Create a file via terminal
-    (``echo "test content" > /tmp/omni_test_file.txt``).
+    (``echo "test content" > /tmp/omni_test_<sid>.txt``).
 
     Turn 2: Read the file via terminal
-    (``cat /tmp/omni_test_file.txt``).
+    (``cat /tmp/omni_test_<sid>.txt``).
 
     The second turn's tool output must contain ``test content``,
     proving the tmux session (and its filesystem side effects)
@@ -229,13 +202,13 @@ def test_terminal_persists_across_turns(
         runner_id=live_runner_id,
     )
 
+    test_file = f"/tmp/omni_test_{session_id[:8]}.txt"
+
     # ── Turn 1: create the file ───────────────────────────────
     resp_id_1 = send_user_message_to_session(
         http_client,
         session_id=session_id,
-        content=(
-            'Run `echo "test content" > /tmp/omni_test_file.txt` in a terminal. Confirm it ran.'
-        ),
+        content=(f'Run `echo "test content" > {test_file}` in a terminal. Confirm it ran.'),
     )
     result_1 = poll_session_until_terminal(
         http_client,
@@ -256,8 +229,7 @@ def test_terminal_persists_across_turns(
         http_client,
         session_id=session_id,
         content=(
-            "Now run `cat /tmp/omni_test_file.txt` in the same "
-            "terminal and tell me what the file contains."
+            f"Now run `cat {test_file}` in the same terminal and tell me what the file contains."
         ),
     )
     result_2 = poll_session_until_terminal(
