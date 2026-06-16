@@ -2054,7 +2054,28 @@ def test_cursor_set_api_key_non_crsr_declined_is_not_stored(isolated_config) -> 
 # ``isolated_config`` clears ambient GEMINI_API_KEY / ANTIGRAVITY_API_KEY.
 
 
-def test_antigravity_set_api_key_paste_writes_block_and_secret(isolated_config) -> None:
+@pytest.fixture()
+def _antigravity_sdk_present(monkeypatch):
+    """Force ``google-antigravity`` detection to report installed.
+
+    The key-management tests below script the Antigravity drill-in assuming no
+    install-offer. The optional ``antigravity`` extra is absent in CI, so without
+    this the drill-in's install-offer fires — consuming a scripted menu token
+    (desyncing the input) and even running a real ``uv pip install``. Patching the
+    source-module attribute is seen at every call site (it's resolved at call
+    time). Mirror of :func:`_antigravity_sdk_absent`.
+
+    :param monkeypatch: Pytest monkeypatch fixture.
+    """
+    monkeypatch.setattr(
+        "omnigent.onboarding.antigravity_auth.antigravity_sdk_installed",
+        lambda: True,
+    )
+
+
+def test_antigravity_set_api_key_paste_writes_block_and_secret(
+    isolated_config, _antigravity_sdk_present
+) -> None:
     """Pasting an ``AIza`` key stores the secret + writes the ``antigravity:`` block.
 
     Proves the api-key path: the secret lands in the store (never plaintext in
@@ -2073,7 +2094,9 @@ def test_antigravity_set_api_key_paste_writes_block_and_secret(isolated_config) 
     assert secrets.load_secret("antigravity") == "AIza_test_key_123"
 
 
-def test_antigravity_adopt_env_api_key_writes_env_ref(isolated_config, monkeypatch) -> None:
+def test_antigravity_adopt_env_api_key_writes_env_ref(
+    isolated_config, monkeypatch, _antigravity_sdk_present
+) -> None:
     """Adopting an existing ``$GEMINI_API_KEY`` records an ``env:`` ref only.
 
     The env path must NOT copy the secret into the store — it points the config
@@ -2091,7 +2114,9 @@ def test_antigravity_adopt_env_api_key_writes_env_ref(isolated_config, monkeypat
     assert secrets.load_secret("antigravity") is None
 
 
-def test_antigravity_remove_api_key_drops_block_and_secret(isolated_config) -> None:
+def test_antigravity_remove_api_key_drops_block_and_secret(
+    isolated_config, _antigravity_sdk_present
+) -> None:
     """Removing a Gemini key deletes the stored secret AND drops the config block."""
     # Seed a stored key: the keychain secret + the ``antigravity:`` block.
     secrets.store_secret("antigravity", "AIza_seeded")
@@ -2110,7 +2135,9 @@ def test_antigravity_remove_api_key_drops_block_and_secret(isolated_config) -> N
     assert secrets.load_secret("antigravity") is None
 
 
-def test_antigravity_remove_does_not_delete_foreign_keychain_secret(isolated_config) -> None:
+def test_antigravity_remove_does_not_delete_foreign_keychain_secret(
+    isolated_config, _antigravity_sdk_present
+) -> None:
     """Removing antigravity drops the block but spares a shared ``keychain:<other>``.
 
     A hand-edited ``antigravity:`` block may point at a secret we don't own
@@ -2135,7 +2162,9 @@ def test_antigravity_remove_does_not_delete_foreign_keychain_secret(isolated_con
     assert secrets.load_secret("shared-gemini") == "AIza_shared_seeded"
 
 
-def test_antigravity_set_api_key_non_aiza_declined_is_not_stored(isolated_config) -> None:
+def test_antigravity_set_api_key_non_aiza_declined_is_not_stored(
+    isolated_config, _antigravity_sdk_present
+) -> None:
     """A non-``AIza`` paste that the user declines to force is NOT persisted.
 
     The soft prefix check warns and asks to store anyway; declining must leave
