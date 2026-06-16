@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+cel = pytest.importorskip("cel_expr_python", reason="cel-expr-python not installed")
+
 from omnigent.policies.builtins.cel import cel_policy
 
 # ── Map return: DENY ────────────────────────────────────────────

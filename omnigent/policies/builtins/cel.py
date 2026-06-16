@@ -31,7 +31,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from cel_expr_python import cel as _cel
+try:
+    from cel_expr_python import cel as _cel
+except ImportError:
+    _cel = None  # type: ignore[assignment]
 
 from omnigent.policies.schema import PolicyCallable, PolicyEvent, PolicyResponse
 
@@ -66,6 +69,12 @@ def cel_policy(
         :class:`PolicyCallable` contract.
     :raises ValueError: If the expression has CEL syntax errors.
     """
+    if _cel is None:
+        raise ImportError(
+            "cel-expr-python is required for CEL policies but is not installed. "
+            "Install it with: pip install cel-expr-python"
+        )
+
     env = _cel.NewEnv(variables={"event": _cel.Type.DYN})
     try:
         compiled = env.compile(expression)
@@ -120,7 +129,7 @@ def cel_policy(
 
 # ── Registry ─────────────────────────────────────────────────────────────────
 
-POLICY_REGISTRY: list[dict[str, Any]] = [
+POLICY_REGISTRY: list[dict[str, Any]] = [] if _cel is None else [
     {
         "handler": "omnigent.policies.builtins.cel.cel_policy",
         "kind": "factory",
