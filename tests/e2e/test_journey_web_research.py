@@ -35,12 +35,7 @@ from typing import Any
 import httpx
 import pytest
 
-from tests.e2e.conftest import (
-    create_runner_bound_session,
-    poll_session_until_terminal,
-    send_user_message_to_session,
-    upload_agent,
-)
+from tests.e2e.conftest import poll_until_terminal, upload_agent
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _WEB_SEARCH_TEST_DIR = _REPO_ROOT / "tests" / "resources" / "agents" / "web-search-test"
@@ -160,7 +155,6 @@ def _all_text(body: dict[str, Any]) -> str:
 def test_web_research_workflow(
     http_client: httpx.Client,
     web_research_agent: str,
-    live_runner_id: str,
 ) -> None:
     """Agent searches → receives stub result → retains context on follow-up.
 
@@ -173,26 +167,29 @@ def test_web_research_workflow(
     Verify:
     - The agent references the year "2024" from the stub's answer,
       demonstrating context retention across turns.
+
+    Uses the direct ``/v1/responses`` endpoint with ``background: True``
+    (the same pattern as ``test_web_search_async_dispatch_e2e.py``) so
+    that the uploaded agent's ``web_search`` tool is available without
+    needing a runner-bound session.
     """
-    session_id = create_runner_bound_session(
-        http_client, agent_name=web_research_agent, runner_id=live_runner_id
-    )
 
     # ── Turn 1: search ──────────────────────────────────────
-    response_id_1 = send_user_message_to_session(
-        http_client,
-        session_id=session_id,
-        content=(
-            "Search the web for information about the omnigent framework "
-            "creation date. Quote the search result verbatim."
-        ),
+    resp_1 = http_client.post(
+        "/v1/responses",
+        json={
+            "model": web_research_agent,
+            "input": (
+                "Search the web for information about the omnigent framework "
+                "creation date. Quote the search result verbatim."
+            ),
+            "background": True,
+        },
     )
-    body_1 = poll_session_until_terminal(
-        http_client,
-        session_id=session_id,
-        response_id=response_id_1,
-        timeout=300,
-    )
+    resp_1.raise_for_status()
+    response_id_1 = resp_1.json()["id"]
+
+    body_1 = poll_until_terminal(http_client, response_id_1, timeout=300)
 
     assert body_1["status"] == "completed", (
         f"Turn 1 status={body_1['status']!r}, output={body_1.get('output', [])}"
@@ -213,17 +210,19 @@ def test_web_research_workflow(
     )
 
     # ── Turn 2: follow-up requiring context retention ───────
-    response_id_2 = send_user_message_to_session(
-        http_client,
-        session_id=session_id,
-        content="Based on what you found, when was the omnigent framework created?",
+    resp_2 = http_client.post(
+        "/v1/responses",
+        json={
+            "model": web_research_agent,
+            "input": "Based on what you found, when was the omnigent framework created?",
+            "previous_response_id": response_id_1,
+            "background": True,
+        },
     )
-    body_2 = poll_session_until_terminal(
-        http_client,
-        session_id=session_id,
-        response_id=response_id_2,
-        timeout=300,
-    )
+    resp_2.raise_for_status()
+    response_id_2 = resp_2.json()["id"]
+
+    body_2 = poll_until_terminal(http_client, response_id_2, timeout=300)
 
     assert body_2["status"] == "completed", (
         f"Turn 2 status={body_2['status']!r}, output={body_2.get('output', [])}"
