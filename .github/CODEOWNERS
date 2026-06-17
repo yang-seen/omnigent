@@ -10,59 +10,60 @@
 # .github/MAINTAINER. Last matching pattern wins, so the `*` default is first
 # and more specific paths override it below.
 #
-# Per-area owners are seeded from the full commit history of the upstream
-# repo (databricks-eng/agent-framework), mapped to public handles by author.
-# A few areas have a top contributor who is not in MAINTAINER (e.g. inner /
-# runner / spec / tools); those list the next most-active maintainers.
-# Still worth a sanity check against real ownership.
+# Per-area owners are the top maintainers by COMBINED commit count across both
+# repos (databricks-eng/agent-framework full history + omnigent-ai/omnigent),
+# ~3-4 per area. Non-maintainer contributors are excluded, including authors of
+# cross-cutting changes that touch many areas (e.g. the sandbox/egress work),
+# which is why a broad one-off contributor is not listed as an area owner.
+# Note: GitHub requests ALL listed owners on a matching PR. Sanity-check
+# against real ownership and trim where a path has too many requests.
 #
 # ROUND-ROBIN / even distribution: the `*` default points at a team
 # (@omnigent-ai/maintainers). Create that team and set its "Code review
 # assignment" to round-robin (load-balance) so unowned PRs are distributed
 # across maintainers instead of pinging everyone. Until the team exists,
 # GitHub ignores the `*` line (no default auto-request) -- the per-area
-# owners below still work. Replace with individuals if you prefer not to use
-# a team.
+# owners below still work.
 
 # Default owner for anything not matched below (round-robin team -- see note).
-*                          @omnigent-ai/maintainers
+*                            @omnigent-ai/maintainers
 
 # Repo automation / CI
-/.github/                  @PattaraS @dhruv0811
+/.github/                    @PattaraS @serena-ruan @dhruv0811 @TomeHirata
 
 # Web UI
-/ap-web/                   @SabhyaC26 @serena-ruan @daniellok-db
+/ap-web/                     @SabhyaC26 @serena-ruan @daniellok-db @dbczumar
 
 # Core agent runtime & harnesses
-/omnigent/inner/           @SabhyaC26 @TomeHirata
-/omnigent/runner/          @SabhyaC26 @TomeHirata
-/omnigent/runtime/         @TomeHirata @dhruv0811
-/omnigent/server/          @dbczumar @dhruv0811
-/omnigent/onboarding/      @dhruv0811 @dbczumar
-/omnigent/policies/        @TomeHirata @SabhyaC26
-/omnigent/spec/            @dhruv0811 @SabhyaC26
-/omnigent/llms/            @dhruv0811
-/omnigent/host/            @fanzeyi @dhruv0811
-/omnigent/sandbox/         @dhruv0811 @SabhyaC26
-/omnigent/environments/    @dhruv0811
-/omnigent/db/              @dhruv0811 @fanzeyi
-/omnigent/stores/          @serena-ruan @fanzeyi
-/omnigent/terminals/       @SabhyaC26 @dhruv0811
-/omnigent/tools/           @SabhyaC26 @dbczumar
-/omnigent/client_tools/    @dhruv0811
-/omnigent/entities/        @TomeHirata @SabhyaC26
-/omnigent/repl/            @dhruv0811 @SabhyaC26
-/omnigent/resources/       @dhruv0811
+/omnigent/inner/             @SabhyaC26 @TomeHirata @dhruv0811 @dbczumar
+/omnigent/runner/            @SabhyaC26 @TomeHirata @serena-ruan @dhruv0811
+/omnigent/runtime/           @TomeHirata @SabhyaC26 @dhruv0811 @ckcuslife-source
+/omnigent/server/            @dhruv0811 @dbczumar @ckcuslife-source @TomeHirata
+/omnigent/onboarding/        @SabhyaC26 @dhruv0811 @dbczumar @bbqiu
+/omnigent/policies/          @TomeHirata @SabhyaC26 @dhruv0811 @PattaraS
+/omnigent/spec/              @SabhyaC26 @dhruv0811 @ckcuslife-source
+/omnigent/llms/              @dhruv0811 @PattaraS @ckcuslife-source
+/omnigent/host/              @fanzeyi @dhruv0811 @dbczumar @TomeHirata
+/omnigent/sandbox/           @dhruv0811 @SabhyaC26
+/omnigent/environments/      @dhruv0811
+/omnigent/db/                @dhruv0811 @SabhyaC26 @fanzeyi
+/omnigent/stores/            @serena-ruan @dhruv0811 @SabhyaC26 @TomeHirata
+/omnigent/terminals/         @dhruv0811 @SabhyaC26 @dbczumar @Edwinhe03
+/omnigent/tools/             @dbczumar @SabhyaC26 @dhruv0811 @PattaraS
+/omnigent/client_tools/      @dhruv0811
+/omnigent/entities/          @dhruv0811 @SabhyaC26 @daniellok-db @TomeHirata
+/omnigent/repl/              @dhruv0811 @SabhyaC26 @dbczumar @TomeHirata
+/omnigent/resources/         @SabhyaC26 @dhruv0811 @fanzeyi @serena-ruan
 
 # Deploy targets
-/deploy/                   @dhruv0811 @PattaraS
+/deploy/                     @dhruv0811 @PattaraS @dbczumar @SabhyaC26
 
 # Python / UI SDKs
-/sdks/                     @fanzeyi @TomeHirata
+/sdks/                       @dbczumar @fanzeyi @SabhyaC26 @TomeHirata
 
 # Tests
-/tests/                    @PattaraS @TomeHirata
+/tests/                      @dbczumar @PattaraS @SabhyaC26 @TomeHirata
 
 # Docs & design
-/docs/                     @dhruv0811 @dbczumar
-/designs/                  @PattaraS @dhruv0811
+/docs/                       @dhruv0811 @dbczumar @TomeHirata @shivam5
+/designs/                    @dbczumar @PattaraS @dhruv0811 @SabhyaC26
