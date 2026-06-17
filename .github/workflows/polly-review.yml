@@ -373,7 +373,7 @@ jobs:
           set -euo pipefail
 
           # Build the comment body safely — REVIEW_TEXT is passed via env
-          # (not ${{ }} interpolation) to avoid expression injection.
+          # (not expression interpolation) to avoid expression injection.
           {
             echo "## <img src=\"https://raw.githubusercontent.com/omnigent-ai/omnigent/main/docs/images/omnigent-logo.svg\" alt=\"\" height=\"20\" valign=\"middle\" /> Polly AI Review"
             echo ""
