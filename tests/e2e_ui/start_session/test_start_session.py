@@ -1024,8 +1024,13 @@ async def _drive_fork_of_fork_dedup(base_url: str, session_id: str) -> None:
             await expect(page.get_by_test_id("new-chat-landing-agent-ag_forkfork")).to_have_count(
                 0
             )
-            # Exactly two options total: the built-in + the one custom agent —
-            # no duplicate "Claude Code" sneaks in via a leaked clone.
-            await expect(page.get_by_role("menuitem")).to_have_count(2)
+            # Exactly two AGENT rows: the built-in + the one custom agent — no
+            # duplicate "Claude Code" sneaks in via a leaked clone. Scoped to
+            # the agent rows (the "ag_" id prefix) so the picker's "Advanced
+            # settings" entry — a sibling menuitem for the auto-selected Claude
+            # Code agent — doesn't inflate the count.
+            await expect(
+                page.locator('[data-testid^="new-chat-landing-agent-ag_"]')
+            ).to_have_count(2)
         finally:
             await browser.close()
