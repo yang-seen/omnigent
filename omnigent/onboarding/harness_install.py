@@ -52,6 +52,11 @@ PI_KEY = "pi"
 # installer rather than npm — so it carries an ``install_hint``, not a ``package``.
 CURSOR_KEY = "cursor"
 
+# OpenCode native harness CLI (``opencode serve`` / ``opencode attach``),
+# installed via the ``opencode-ai`` npm package. No login/logout/status argv
+# is wired yet — readiness is binary-only until an auth check exists.
+OPENCODE_KEY = "opencode"
+
 
 @dataclass(frozen=True)
 class HarnessInstallSpec:
@@ -114,6 +119,7 @@ _HARNESS_INSTALL: dict[str, HarnessInstallSpec] = {
         status_args=("login", "status"),
     ),
     PI_KEY: HarnessInstallSpec("Pi", "pi", "@earendil-works/pi-coding-agent"),
+    OPENCODE_KEY: HarnessInstallSpec("OpenCode", "opencode", "opencode-ai"),
     CURSOR_KEY: HarnessInstallSpec(
         "Cursor",
         "cursor-agent",
@@ -142,6 +148,7 @@ _HARNESS_NAME_TO_KEY: dict[str, str] = {
     "codex-native": OPENAI_FAMILY,
     PI_KEY: PI_KEY,
     "pi-native": PI_KEY,
+    "opencode-native": OPENCODE_KEY,
 }
 
 

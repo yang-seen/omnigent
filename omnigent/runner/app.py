@@ -5140,6 +5140,18 @@ def create_runner_app(
                 from omnigent.pi_native_bridge import build_pi_native_spawn_env
 
                 spawn_env = build_pi_native_spawn_env(session_id)
+            if harness_name == "opencode-native" and spawn_env is None:
+                from omnigent.opencode_native_bridge import (
+                    OPENCODE_NATIVE_BRIDGE_ID_LABEL_KEY,
+                    build_opencode_native_spawn_env,
+                )
+
+                labels = await _session_labels_for_runner_spawn(
+                    server_client=server_client,
+                    session_id=session_id,
+                )
+                bridge_id = labels.get(OPENCODE_NATIVE_BRIDGE_ID_LABEL_KEY)
+                spawn_env = build_opencode_native_spawn_env(session_id, bridge_id=bridge_id)
             _session_spec_cache[session_id] = spec_entry
             from omnigent.llms.context_window import get_model_context_window
             from omnigent.runtime.workflow import _resolve_spec_model
@@ -9074,6 +9086,18 @@ def create_runner_app(
             from omnigent.pi_native_bridge import build_pi_native_spawn_env
 
             spawn_env = build_pi_native_spawn_env(conv_id)
+        if harness_name == "opencode-native" and spawn_env is None:
+            from omnigent.opencode_native_bridge import (
+                OPENCODE_NATIVE_BRIDGE_ID_LABEL_KEY,
+                build_opencode_native_spawn_env,
+            )
+
+            labels = await _session_labels_for_runner_spawn(
+                server_client=server_client,
+                session_id=conv_id,
+            )
+            bridge_id = labels.get(OPENCODE_NATIVE_BRIDGE_ID_LABEL_KEY)
+            spawn_env = build_opencode_native_spawn_env(conv_id, bridge_id=bridge_id)
 
         agent_version = dispatch.agent_version if dispatch else body.get("agent_version")
         if agent_version is not None and conv_id in _version_cache:

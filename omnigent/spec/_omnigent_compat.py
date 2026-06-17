@@ -42,6 +42,7 @@ import yaml
 
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.harness_aliases import canonicalize_harness
+from omnigent.runtime.harness_descriptors import all_harness_aliases, canonical_harness_ids
 
 if TYPE_CHECKING:
     from omnigent.spec.types import AgentSpec
@@ -73,24 +74,14 @@ OMNIGENT_EXECUTOR_TYPE = "omnigent"
 # made ``examples/terminal_workers.yaml``
 # fail at spec-load with a "must be one of [...], got
 # 'open-responses'" error.
-OMNIGENT_HARNESSES = frozenset(
-    {
-        "antigravity",
-        "claude-native",
-        "claude-sdk",
-        "codex",
-        "codex-native",
-        "cursor",
-        "openai-agents",
-        "open-responses",
-        "pi",
-        "pi-native",
-    },
-)
+# Derived from the single
+# :data:`~omnigent.runtime.harness_descriptors.HARNESS_DESCRIPTORS`
+# registration (canonical ids and their aliases). ``open-responses`` is a
+# descriptor too, so it stays in the allowlist; ``opencode-native`` joins
+# automatically. The conformance suite asserts this equals the descriptors.
+OMNIGENT_HARNESSES = frozenset(canonical_harness_ids())
 # User-facing aliases accepted in specs and normalized before runtime dispatch.
-OMNIGENT_HARNESS_ALIASES = frozenset(
-    {"claude", "native-pi", "openai-agents-sdk", "agy", "google-antigravity"}
-)
+OMNIGENT_HARNESS_ALIASES = frozenset(all_harness_aliases())
 _OMNIGENT_ACCEPTED_HARNESSES = OMNIGENT_HARNESSES | OMNIGENT_HARNESS_ALIASES
 
 
