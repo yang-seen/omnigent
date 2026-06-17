@@ -190,12 +190,6 @@ skips:
     cluster: files-uploads-attachments
     mode: skip
 
-  - id: tests/e2e/test_openai_coder_codex_tools.py::test_openai_coder_uses_codex_shell
-    reason: "Shard 0 bulk: openai-coder + codex tool interop. Triage under #532."
-    issue: 532
-    cluster: run-ap-examples-harness
-    mode: skip
-
   - id: tests/e2e/test_repl_approval_e2e.py::test_repl_tool_call_refusal_blocks_tool
     reason: "Shard 0 bulk: REPL approval pexpect-timeout family (same as other test_repl_approval_e2e entries)."
     issue: 532
@@ -313,24 +307,6 @@ skips:
     reason: "GET /v1/sessions/{id}/items returns empty body (JSONDecodeError); server-side regression, not LLM flakiness. Failed all 3 retry attempts in PR #2053."
     issue: 532
     cluster: files-uploads-attachments
-    mode: skip
-
-  - id: tests/e2e/test_decorated_tools_e2e.py::test_decorated_tools_varied_signatures_e2e
-    reason: "Shard 1 bulk: decorated tools varied signatures. Triage under #532."
-    issue: 532
-    cluster: run-ap-examples-harness
-    mode: skip
-
-  - id: tests/e2e/test_openai_coder_codex_tools.py::test_openai_coder_codex_creates_and_lists_file
-    reason: "Shard 1 bulk: openai-coder + codex tools interop."
-    issue: 532
-    cluster: files-uploads-attachments
-    mode: skip
-
-  - id: tests/e2e/test_openai_coder_codex_tools.py::test_openai_coder_codex_lists_directory
-    reason: "Shard 1 bulk: openai-coder + codex tools interop."
-    issue: 532
-    cluster: run-ap-examples-harness
     mode: skip
 
   - id: tests/e2e/test_policies_e2e.py::test_label_gate_untainted_conversation_passes
@@ -654,12 +630,6 @@ skips:
     issue: 532
     cluster: run-ap-examples-harness
     mode: skip
-  - id: tests/e2e/omnigent/test_serve_omnigent_routes_to_omnigent.py::test_serve_omnigent_routes_to_omnigent
-    reason: "Nightly bulk: serve-flags / serve-smoke cluster."
-    issue: 532
-    cluster: run-ap-examples-harness
-    mode: skip
-
   - id: tests/e2e/omnigent/test_serve_smoke.py::test_serve_smoke_one_chat_round_trip
     reason: "Nightly bulk: serve-flags / serve-smoke cluster."
     issue: 532
