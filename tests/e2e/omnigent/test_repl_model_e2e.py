@@ -79,14 +79,18 @@ def test_repl_model_command_show_set_reset(
         child.expect(r"❯ ", timeout=_BOOT_TIMEOUT)
 
         _submit_slash_command(child, "/model")
-        # ``(agent default)`` is the canonical phrase the no-override
-        # show branch emits — search the slash-command handler for
-        # the matching string if you rename it.
-        child.expect(r"model: \(agent default\)", timeout=10)
-        # Usage hint is always printed alongside the show line.
-        child.expect("usage: /model", timeout=10)
+        # The no-arg show branch now renders the credential readout
+        # via ``_build_model_readout_lines`` — a single ``Active:``
+        # line (``<model> · <provider> · <source>``) instead of the
+        # retired ``model: (agent default)`` / ``usage:`` pair. The
+        # ``Active:`` header is emitted on every resolved-credential
+        # show, so it is the stable readiness anchor here.
+        child.expect("Active:", timeout=10)
 
         _submit_slash_command(child, f"/model {_OVERRIDE_MODEL}")
+        # The set branch confirms with ``model set to <name> for
+        # future responses`` — match the leading fragment so the
+        # trailing ``for future responses`` suffix doesn't matter.
         child.expect(f"model set to {_OVERRIDE_MODEL}", timeout=10)
 
         # Same drain trick test_repl_effort_e2e.py uses: nudge a
@@ -96,7 +100,11 @@ def test_repl_model_command_show_set_reset(
         child.expect(r"❯ ", timeout=10)
 
         _submit_slash_command(child, "/model")
-        child.expect(f"model: {_OVERRIDE_MODEL}", timeout=10)
+        # After the override, the readout's ``Active:`` line carries
+        # the override model id (``Active:  <override>  ·  …``), so
+        # the model id appears in the show output — proves session
+        # state persisted between commands.
+        child.expect(_OVERRIDE_MODEL, timeout=10)
 
         _submit_slash_command(child, "/model default")
         child.expect("model reset to agent default", timeout=10)

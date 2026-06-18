@@ -125,13 +125,19 @@ def test_repl_multiline_ctrl_j_insert(
         # text.
         "first_line_present": _FIRST_LINE in combined_stripped,
         "second_line_present": _SECOND_LINE in combined_stripped,
-        # The "You>" banner is the REPL's deterministic echo of
-        # a submitted prompt. If only the input buffer were shown
-        # (no submission), this would be absent — the banner
-        # proves ``_submit_input`` actually ran with the full
-        # multi-line text.
-        "user_banner_present": "You>" in combined_stripped,
-        "agent_banner_present": "Agent>" in combined_stripped,
+        # The ``❯ <text>`` echo card is the REPL's deterministic
+        # render of a submitted prompt (``RichBlockFormatter.
+        # user_message`` emits ``❯ <text>``; the legacy ``You>``
+        # banner was retired). The bare ``❯`` glyph is also the
+        # input prompt, so pair it with the first typed line to
+        # prove ``_submit_input`` actually ran with the full
+        # multi-line text rather than matching the idle prompt.
+        "user_banner_present": f"❯ {_FIRST_LINE}" in combined_stripped,
+        # The assistant response renders under a ``◆ <model>``
+        # header (``RichBlockFormatter`` diamond glyph; the legacy
+        # ``Agent>`` banner was retired). ``◆`` is unique to
+        # assistant output — the user echo uses ``❯``.
+        "agent_banner_present": "◆" in combined_stripped,
     }
     diffs = compare_snapshot("test_repl_multiline", observed)
     assert diffs == [], (
