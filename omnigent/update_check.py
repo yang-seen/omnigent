@@ -83,6 +83,11 @@ _SIMPLE_JSON_ACCEPT = "application/vnd.pypi.simple.v1+json"
 # Keep the background index lookup snappy. It runs detached so it never
 # blocks the CLI, but a tight timeout still bounds the orphan's lifetime.
 _INDEX_TIMEOUT_SECONDS = 3.0
+# The foreground ``omni upgrade`` is user-initiated and worth waiting on, so it
+# uses a more forgiving timeout (and one retry) than the background refresh — a
+# briefly slow mirror shouldn't make ``omni upgrade --check`` spuriously report
+# "couldn't reach the index".
+_UPGRADE_INDEX_TIMEOUT_SECONDS = 10.0
 # The placeholder that PEP 610 tooling (pip, newer uv) writes into
 # ``direct_url.json`` in place of a URL's userinfo. See
 # ``_unredact_ssh_userinfo`` for why we have to repair it.
@@ -454,19 +459,29 @@ def _index_from_pip_config() -> str:
     return ""
 
 
-def fetch_latest_version(include_prereleases: bool = False) -> str | None:
+def fetch_latest_version(
+    include_prereleases: bool = False,
+    *,
+    timeout: float = _INDEX_TIMEOUT_SECONDS,
+    attempts: int = 1,
+) -> str | None:
     """Fetch the latest ``omnigent`` release from the configured index.
 
     Queries the Simple Repository API of the resolved index
     (:func:`_resolve_index_url`) — PEP 691 JSON when the index serves it,
-    PEP 503 HTML otherwise. Network call with a tight timeout, swallowing
-    every error so the update check can never break (or slow) the CLI;
-    intended for the detached background refresh, not the hot path.
+    PEP 503 HTML otherwise. Swallows every error so the update check can never
+    break the CLI. The background refresh uses the defaults (one snappy try);
+    the foreground ``omni upgrade`` passes a longer *timeout* and *attempts=2*
+    so a momentarily slow mirror doesn't spuriously read as "unreachable".
 
     :param include_prereleases: When ``False`` (default), pre-releases and
         dev releases are excluded so we never nag about a non-final build.
         When ``True`` (``omni upgrade --pre`` / TestPyPI rc validation),
         they are considered too.
+    :param timeout: Per-request timeout in seconds.
+    :param attempts: Total number of tries; a transient connection/timeout
+        error retries until they are exhausted. A definitive non-200 response
+        is never retried. Values < 1 are treated as 1.
     :returns: The latest matching version string (e.g. ``"0.2.0"`` or, with
         pre-releases, ``"0.2.0rc1"``), or ``None`` on any network / parse
         error, a non-200 response, or when no matching release is found.
@@ -475,16 +490,19 @@ def fetch_latest_version(include_prereleases: bool = False) -> str | None:
     from packaging.utils import canonicalize_name
 
     url = f"{_resolve_index_url()}/{canonicalize_name(_DIST_NAME)}/"
-    try:
-        resp = httpx.get(
-            url,
-            headers={"Accept": _SIMPLE_JSON_ACCEPT},
-            timeout=_INDEX_TIMEOUT_SECONDS,
-            follow_redirects=True,
-        )
-    except httpx.HTTPError:
-        return None
-    if resp.status_code != 200:
+    resp = None
+    for _ in range(max(1, attempts)):
+        try:
+            resp = httpx.get(
+                url,
+                headers={"Accept": _SIMPLE_JSON_ACCEPT},
+                timeout=timeout,
+                follow_redirects=True,
+            )
+            break  # got a response (any status) — don't retry a definitive reply
+        except httpx.HTTPError:
+            resp = None  # transient (timeout / connection reset) — retry if any left
+    if resp is None or resp.status_code != 200:
         return None
 
     versions = _parse_simple_versions(resp)

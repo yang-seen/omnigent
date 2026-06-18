@@ -216,7 +216,7 @@ def test_upgrade_pre_check_detects_release_candidate(
     """``--pre --check`` includes pre-releases and reports the rc as available."""
     captured: dict[str, object] = {}
 
-    def _fetch(include_prereleases: bool = False) -> str:
+    def _fetch(include_prereleases: bool = False, **_kw: object) -> str:
         captured["include_prereleases"] = include_prereleases
         return "0.1.1rc1" if include_prereleases else "0.1.0"
 
@@ -234,7 +234,7 @@ def test_upgrade_without_pre_ignores_release_candidate(
 ) -> None:
     """Without ``--pre`` the rc is invisible → reports up to date."""
 
-    def _fetch(include_prereleases: bool = False) -> str | None:
+    def _fetch(include_prereleases: bool = False, **_kw: object) -> str | None:
         return "0.1.1rc1" if include_prereleases else "0.1.0"
 
     monkeypatch.setattr("omnigent.update_check.fetch_latest_version", _fetch)
@@ -298,7 +298,7 @@ def test_upgrade_pre_passes_prerelease_flag_to_installer(
     """``--pre`` upgrade runs the uv command with ``--prerelease allow``."""
     monkeypatch.setattr(
         "omnigent.update_check.fetch_latest_version",
-        lambda include_prereleases=False: "0.1.1rc1",
+        lambda include_prereleases=False, **_kw: "0.1.1rc1",
     )
     monkeypatch.setattr("omnigent.cli._wait_for_local_sessions_to_drain", lambda: None)
     monkeypatch.setattr("omnigent.cli._stop_local_server_and_daemon", lambda *, force: False)

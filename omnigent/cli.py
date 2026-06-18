@@ -3577,6 +3577,7 @@ def upgrade(check_only: bool, force: bool, pre: bool) -> None:
     import importlib.metadata
 
     from omnigent.update_check import (
+        _UPGRADE_INDEX_TIMEOUT_SECONDS,
         _build_upgrade_suggestion,
         _find_repo_root,
         _is_newer,
@@ -3615,7 +3616,11 @@ def upgrade(check_only: bool, force: bool, pre: bool) -> None:
         return
 
     current = importlib.metadata.version("omnigent")
-    latest = fetch_latest_version(include_prereleases=pre)
+    # User-initiated: a more forgiving timeout + one retry so a momentarily slow
+    # mirror doesn't spuriously report the index as unreachable.
+    latest = fetch_latest_version(
+        include_prereleases=pre, timeout=_UPGRADE_INDEX_TIMEOUT_SECONDS, attempts=2
+    )
     if latest is None:
         raise click.ClickException(
             "Couldn't reach the package index to check for a newer release. Check your "

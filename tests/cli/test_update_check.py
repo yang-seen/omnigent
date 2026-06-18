@@ -1294,6 +1294,71 @@ def test_fetch_latest_version_pep691_json(monkeypatch: pytest.MonkeyPatch) -> No
     assert captured["headers"] == {"Accept": "application/vnd.pypi.simple.v1+json"}
 
 
+def test_fetch_latest_version_retries_transient_then_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``attempts=2`` retries a transient connection error, then succeeds.
+
+    Regression: the foreground ``omni upgrade`` shouldn't report the index as
+    unreachable on a single momentary blip against a slow mirror.
+    """
+    import httpx
+
+    from omnigent.update_check import fetch_latest_version
+
+    _clear_index_env(monkeypatch)
+    calls = {"n": 0}
+
+    def _get(url: str, **_kw: object) -> _FakeResp:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ConnectError("transient")
+        return _FakeResp(json_body={"versions": ["0.1.0", "0.2.0"]})
+
+    monkeypatch.setattr(httpx, "get", _get)
+
+    assert fetch_latest_version(attempts=2) == "0.2.0"
+    assert calls["n"] == 2  # retried exactly once
+
+
+def test_fetch_latest_version_no_retry_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The background path (default ``attempts=1``) makes a single try."""
+    import httpx
+
+    from omnigent.update_check import fetch_latest_version
+
+    _clear_index_env(monkeypatch)
+    calls = {"n": 0}
+
+    def _get(url: str, **_kw: object) -> _FakeResp:
+        calls["n"] += 1
+        raise httpx.ConnectError("transient")
+
+    monkeypatch.setattr(httpx, "get", _get)
+
+    assert fetch_latest_version() is None
+    assert calls["n"] == 1
+
+
+def test_fetch_latest_version_does_not_retry_non_200(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A definitive non-200 reply is not retried, even with ``attempts=2``."""
+    import httpx
+
+    from omnigent.update_check import fetch_latest_version
+
+    _clear_index_env(monkeypatch)
+    calls = {"n": 0}
+
+    def _get(url: str, **_kw: object) -> _FakeResp:
+        calls["n"] += 1
+        return _FakeResp(status_code=503)
+
+    monkeypatch.setattr(httpx, "get", _get)
+
+    assert fetch_latest_version(attempts=2) is None
+    assert calls["n"] == 1
+
+
 def test_fetch_latest_version_from_files_when_no_versions_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
