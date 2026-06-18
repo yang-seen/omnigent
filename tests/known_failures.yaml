@@ -101,12 +101,6 @@ skips:
     cluster: policy-guardrails
     mode: skip
 
-  - id: tests/e2e/omnigent/test_run_omnigent_policy_enforcement.py::test_policy_denies_sub_agent_by_name[codex]
-    reason: "Shard 0 bulk: same policy-enforcement cluster as #476."
-    issue: 476
-    cluster: policy-guardrails
-    mode: skip
-
   - id: tests/e2e/test_async_tools_e2e.py::test_async_tool_real_llm_e2e
     reason: "Shard 0 bulk: async tool real-LLM assertion failure. Triage under #532."
     issue: 532
@@ -166,18 +160,6 @@ skips:
 
   - id: tests/e2e/omnigent/test_run_omnigent_policy_enforcement.py::test_policy_denies_input_containing_sentinel[codex]
     reason: "Shard 1 bulk: policy-enforcement cluster (#476)."
-    issue: 476
-    cluster: policy-guardrails
-    mode: skip
-
-  - id: tests/e2e/omnigent/test_run_omnigent_policy_enforcement.py::test_policy_denies_sub_agent_by_name[claude-sdk]
-    reason: "Shard 1 bulk: sub_agent deny under claude-sdk."
-    issue: 476
-    cluster: policy-guardrails
-    mode: skip
-
-  - id: tests/e2e/omnigent/test_run_omnigent_policy_enforcement.py::test_policy_denies_sub_agent_by_name[openai-agents]
-    reason: "Shard 1 bulk: sub_agent deny under openai-agents."
     issue: 476
     cluster: policy-guardrails
     mode: skip
