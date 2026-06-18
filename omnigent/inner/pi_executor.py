@@ -124,6 +124,32 @@ JsonValue: TypeAlias = None | bool | int | float | str | list["JsonValue"] | dic
 # ---------------------------------------------------------------------------
 
 
+def _safe_dumps(response: dict[str, Any], req_id: str | None) -> str:  # type: ignore[explicit-any]
+    """Serialize a tool-server response, never raising on bad payloads.
+
+    Tool callbacks may return values ``json.dumps`` can't encode (a
+    ``datetime``, ``set``, ``bytes``, custom object, ...). Encoding happens
+    on the response path *outside* :meth:`_ToolServer._execute`'s try, so an
+    unguarded ``json.dumps`` would propagate and the connection would close
+    with zero bytes written — leaving the JS ``callTool`` promise pending and
+    hanging the entire Pi turn. Mirrors codex's ``_result_text`` guard: on a
+    serialization failure, fall back to an ``{"error": ...}`` envelope so the
+    client always receives a valid frame.
+
+    :param response: The response dict to serialize.
+    :param req_id: The originating request id, echoed back on the error
+        envelope so the client correlates the failure with its call.
+    :returns: A compact JSON string (no trailing newline).
+    """
+    try:
+        return json.dumps(response, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        return json.dumps(
+            {"id": req_id, "error": f"unserializable tool result: {exc}"},
+            separators=(",", ":"),
+        )
+
+
 class _ToolServer:
     """Async TCP server that handles tool-call requests from the Pi extension.
 
@@ -213,7 +239,14 @@ class _ToolServer:
                 else:
                     response = await self._execute(raw_tool_name, tool_args)
                     response["id"] = raw_req_id
-                out = json.dumps(response, separators=(",", ":")) + "\n"
+                # Serialize defensively: a tool result may carry a value
+                # ``json.dumps`` can't encode (e.g. ``datetime``/``set``).
+                # If it raises here — outside ``_execute``'s try — the frame
+                # is never written and the JS ``callTool`` promise hangs the
+                # whole turn (no ``data``/``error`` event). Always emit a JSON
+                # frame: a serializable error envelope when the response can't
+                # be encoded, mirroring codex's ``_result_text`` guard.
+                out = _safe_dumps(response, raw_req_id) + "\n"
                 writer.write(out.encode("utf-8"))
                 await writer.drain()
         except (asyncio.CancelledError, ConnectionError):
@@ -371,7 +404,17 @@ const TOKEN = {token_json};
 
 /** Send a tool call request over TCP and return the result. */
 function callTool(toolName, args) {{
-  return new Promise((resolve, reject) => {{
+  return new Promise((resolve) => {{
+    // Idempotent settle: a tool call must resolve exactly once. Route every
+    // resolve through finish() so a late "close" after a real "data" response
+    // can't clobber the result, and a bare close with no data still resolves
+    // (rather than hanging Pi's agent loop forever).
+    let settled = false;
+    const finish = (v) => {{ if (!settled) {{ settled = true; resolve(v); }} }};
+    const errorResult = (text) => ({{
+      content: [{{ type: "text", text: JSON.stringify({{ error: text }}) }}],
+      isError: true
+    }});
     const client = net.createConnection({{ port: PORT, host: "127.0.0.1" }}, () => {{
       const id = Math.random().toString(36).slice(2);
       const req = JSON.stringify({{ id, token: TOKEN, tool: toolName, args }}) + "\\n";
@@ -384,39 +427,33 @@ function callTool(toolName, args) {{
             const resp = JSON.parse(buf.slice(0, nl));
             client.end();
             if (resp.error) {{
-              resolve({{
-                content: [{{ type: "text", text: JSON.stringify({{ error: resp.error }}) }}],
-                isError: true
-              }});
+              finish(errorResult(resp.error));
             }} else {{
               const text = typeof resp.result === "string"
                 ? resp.result
                 : JSON.stringify(resp.result);
               const isError = resp.result && (resp.result.error || resp.result.blocked);
-              resolve({{ content: [{{ type: "text", text }}], isError: !!isError }});
+              finish({{ content: [{{ type: "text", text }}], isError: !!isError }});
             }}
           }} catch (e) {{
             client.end();
-            resolve({{
-              content: [{{ type: "text", text: JSON.stringify({{ error: e.message }}) }}],
-              isError: true
-            }});
+            finish(errorResult(e.message));
           }}
         }}
       }});
       client.on("error", (err) => {{
-        resolve({{
-          content: [{{ type: "text", text: JSON.stringify({{ error: err.message }}) }}],
-          isError: true
-        }});
+        finish(errorResult(err.message));
+      }});
+      // A clean FIN with no bytes (e.g. the server failed to serialize the
+      // result and closed) emits neither "data" nor "error"; without this
+      // the promise would hang forever. finish() is a no-op if already settled.
+      client.on("close", () => {{
+        finish(errorResult("tool server closed connection without a response"));
       }});
       client.write(req);
     }});
     client.on("error", (err) => {{
-      resolve({{
-        content: [{{ type: "text", text: JSON.stringify({{ error: err.message }}) }}],
-        isError: true
-      }});
+      finish(errorResult(err.message));
     }});
   }});
 }}

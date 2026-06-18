@@ -5,6 +5,7 @@ import json
 import os
 import socket
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -600,6 +601,50 @@ class TestToolServer(unittest.TestCase):
             response = json.loads(response_line)
             self.assertEqual(response["id"], "req3")
             self.assertIn("No tool executor", response["error"])
+
+            writer.close()
+            await server.stop()
+
+        _run(_test())
+
+    def test_non_json_serializable_result_returns_error_frame(self):
+        """A tool result ``json.dumps`` can't encode yields an error frame.
+
+        Regression for F03: serialization happens on the response path
+        *outside* ``_execute``'s try, so a tool returning a ``datetime`` (or
+        ``set``) used to raise ``TypeError`` there, close the socket with zero
+        bytes, and hang the JS ``callTool`` promise — wedging the whole turn.
+        The handler must instead always write a valid frame: here an
+        ``{"error": ...}`` envelope, correlated by ``id``, delivered well
+        within the timeout (proving it did not hang).
+        """
+
+        async def _test():
+            server = _ToolServer()
+            await server.start()
+
+            async def executor(name, args):
+                # A dict carrying values json.dumps rejects by default.
+                return {"when": datetime(2026, 6, 18, 12, 0, 0), "tags": {1, 2, 3}}
+
+            server._tool_executor = executor
+
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.port)
+            request = (
+                json.dumps({"id": "req6", "token": server.token, "tool": "exotic", "args": {}})
+                + "\n"
+            )
+            writer.write(request.encode())
+            await writer.drain()
+
+            # The key assertion is that a frame arrives at all (no hang): a
+            # short timeout would fire if the response path crashed/closed.
+            response_line = await asyncio.wait_for(reader.readline(), timeout=5.0)
+            self.assertTrue(response_line, "tool server closed without writing a frame (hang)")
+            response = json.loads(response_line)
+            self.assertEqual(response["id"], "req6")
+            self.assertIn("unserializable tool result", response["error"])
+            self.assertNotIn("result", response)
 
             writer.close()
             await server.stop()
