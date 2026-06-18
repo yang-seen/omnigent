@@ -220,9 +220,7 @@ def test_databricks_auth_does_not_adopt_stored_cursor_key(
     assert "HARNESS_CURSOR_API_KEY" not in env
 
 
-def test_empty_stored_env_key_is_omitted(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_empty_stored_env_key_is_omitted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """A configured ``env:CURSOR_API_KEY`` ref pointing at an EMPTY var is omitted.
 
     ``resolve_secret``'s ``env:`` branch only raises on an *unset* variable, so
