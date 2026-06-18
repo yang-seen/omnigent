@@ -54,6 +54,16 @@ import pytest
 from tests.e2e.conftest import configure_mock_llm, send_user_message_to_session
 from tests.integration.conftest import JourneySession
 
+# The mock LLM is scripted with a fixed tool-call sequence, so these
+# tests cannot run against a real LLM (it would 401 on the mock base URL
+# and could never reproduce the scripted call_ids/markers). The central
+# gate in ``tests/integration/conftest.py`` skips ``mock_only`` tests
+# when a real ``--llm-api-key`` is supplied (the real-LLM Integration
+# jobs). This replaces the dead ``if mock_llm_server_url is None: skip``
+# guards: that fixture is always started regardless of --llm-api-key, so
+# the guard never fired in any job.
+pytestmark = pytest.mark.mock_only
+
 _COMPUTE_TOOL: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -141,9 +151,6 @@ def test_client_tool_round_trip(
     full server->client round-trip the SSE-parser unit tests
     never reach.
     """
-    if mock_llm_server_url is None:
-        pytest.skip("requires the mock LLM server (mock mode)")
-
     marker = f"D6-ROUND-TRIP-{uuid.uuid4().hex[:8]}"
     call_id = f"call_{uuid.uuid4().hex[:8]}"
     sid = journey_session.session_id
@@ -268,9 +275,6 @@ def test_direct_cancel_parks_then_interrupts_cleanly(
     sessions surface the runner synthesizes the idle terminal +
     history instead, and that synthesized shape is what clients see.
     """
-    if mock_llm_server_url is None:
-        pytest.skip("requires the mock LLM server (mock mode)")
-
     call_id = f"call_{uuid.uuid4().hex[:8]}"
     sid = journey_session.session_id
 
