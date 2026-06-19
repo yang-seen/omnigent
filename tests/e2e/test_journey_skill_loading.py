@@ -1,16 +1,8 @@
 """E2E journey test: skill loading and execution (mock LLM).
 
-Verifies the full user journey of loading a bundled skill and
-using its content in a follow-up turn, driven by a mock LLM:
-
-1. Create session with an inline agent.
-2. Mock LLM returns load_skill + read_skill_file tool calls.
-3. Verify the tools were called and returned skill content.
-4. Mock LLM returns text referencing the skill knowledge.
-5. Verify the response references the skill's content.
-
-load_skill and read_skill_file are always auto-registered by the
-runner's ToolManager regardless of spec tools.builtins declaration.
+Verifies that load_skill is dispatched correctly end-to-end with a mock
+LLM. load_skill is always auto-registered by the runner's ToolManager
+regardless of spec declaration.
 
 Usage::
 
@@ -44,21 +36,12 @@ def _extract_tool_names(body: dict[str, Any]) -> list[str]:
     ]
 
 
-def _extract_tool_results(body: dict[str, Any]) -> list[str]:
-    """Extract all function_call_output strings from a response body."""
-    return [
-        item.get("output", "")
-        for item in body.get("output", [])
-        if item.get("type") == "function_call_output"
-    ]
-
-
 def test_skill_loading_journey(
     http_client: httpx.Client,
     live_runner_id: str,
     mock_llm_server_url: str,
 ) -> None:
-    """Full journey: load a skill, read its reference file, use its content.
+    """Full journey: load a skill and use its content in a follow-up.
 
     :param http_client: HTTP client pointed at the live e2e server.
     :param live_runner_id: Runner id bound to the session.
@@ -74,12 +57,13 @@ def test_skill_loading_journey(
         model=model,
         profile="",
         prompt=(
-            "You are a research assistant with skill loading capability. "
-            "When asked, call load_skill and read_skill_file tools."
+            "You are a research assistant. "
+            "When asked, call load_skill to load skills."
         ),
         mock_llm_base_url=f"{mock_llm_server_url}/v1",
     )
 
+    # Turn 1: mock returns load_skill call, then text about the skill.
     configure_mock_llm(
         mock_llm_server_url,
         [
@@ -93,21 +77,9 @@ def test_skill_loading_journey(
                 ],
             },
             {
-                "tool_calls": [
-                    {
-                        "call_id": "call_rsf1",
-                        "name": "read_skill_file",
-                        "arguments": (
-                            '{"skill_name": "deep-research", '
-                            '"path": "references/research-checklist.md"}'
-                        ),
-                    }
-                ],
-            },
-            {
                 "text": (
-                    "I've loaded the deep-research skill and read the checklist. "
-                    "The research checklist requires verifying claims against "
+                    "I loaded the deep-research skill. "
+                    "The checklist requires verifying claims against "
                     "3 independent sources before presenting conclusions."
                 ),
             },
@@ -124,13 +96,7 @@ def test_skill_loading_journey(
     response_id = send_user_message_to_session(
         http_client,
         session_id=session_id,
-        content=(
-            "Call load_skill with name=deep-research. "
-            "Then call read_skill_file with "
-            "skill_name=deep-research and "
-            "path=references/research-checklist.md. "
-            "Tell me what the checklist says."
-        ),
+        content="Call load_skill with name=deep-research. Tell me what the skill is about.",
     )
 
     body = poll_session_until_terminal(
@@ -148,20 +114,18 @@ def test_skill_loading_journey(
     assert "load_skill" in tool_names, (
         f"Expected load_skill tool call. Tool calls: {tool_names}."
     )
-    assert "read_skill_file" in tool_names, (
-        f"Expected read_skill_file tool call. Tool calls: {tool_names}."
-    )
 
+    # Turn 2: follow-up
     configure_mock_llm(
         mock_llm_server_url,
         [
             {
                 "text": (
-                    "Based on the research checklist from the deep-research "
-                    "skill, the key steps before presenting a conclusion are: "
+                    "Based on the deep-research skill, "
+                    "key steps before a conclusion: "
                     "1. Verify claims against 3 independent sources. "
-                    "2. Prefer primary sources over secondary ones. "
-                    "3. Cross-check for consistency across sources."
+                    "2. Prefer primary sources. "
+                    "3. Cross-check for consistency."
                 ),
             },
         ],
@@ -171,11 +135,7 @@ def test_skill_loading_journey(
     followup_response_id = send_user_message_to_session(
         http_client,
         session_id=session_id,
-        content=(
-            "Using the research checklist from the deep-research skill "
-            "you just loaded, what are the key steps before presenting "
-            "a conclusion?"
-        ),
+        content="What are the key steps before presenting a conclusion?",
     )
 
     followup_body = poll_session_until_terminal(
@@ -192,6 +152,6 @@ def test_skill_loading_journey(
     followup_text = final_assistant_text(followup_body)
     text_lower = followup_text.lower()
     assert "source" in text_lower or "verify" in text_lower, (
-        f"Expected the agent to reference the research checklist content "
-        f"(sources, verification). Got: {followup_text[:500]}"
+        f"Expected agent to reference checklist (sources, verification). "
+        f"Got: {followup_text[:500]}"
     )

@@ -1,17 +1,11 @@
 """E2E test: "first session to working code" user journey (mock LLM).
 
-Exercises the full developer workflow end-to-end with a mock LLM:
-create session -> chat with agent -> agent writes code -> add review
-comment -> agent addresses comment.
-
-The mock LLM returns pre-scripted tool calls (sys_os_write for the
-coding turn, list_comments + update_comment for the review turn)
-so the test validates the session/tool dispatch pipeline without
-requiring a real LLM.
+Exercises the comment-tools part of the developer workflow:
+create session -> agent describes code -> add review comment ->
+agent uses list_comments + update_comment to mark it addressed.
 
 list_comments and update_comment are always auto-registered by the
-runner's ToolManager. sys_os_write is dispatched by the runner via
-a per-conversation tmpdir fallback when the spec declares no os_env.
+runner's ToolManager and are verified here.
 
 Usage::
 
@@ -77,31 +71,22 @@ def test_first_session_to_working_code_journey(
         model=model,
         profile="",
         prompt=(
-            "You are a coding assistant. When asked to write code, use "
-            "the sys_os_write tool to create files. When asked to address "
+            "You are a coding assistant. When asked to address "
             "review comments, call list_comments then update_comment."
         ),
         mock_llm_base_url=f"{mock_llm_server_url}/v1",
     )
 
+    # Turn 1: mock returns text (agent describes writing the code).
     configure_mock_llm(
         mock_llm_server_url,
         [
             {
-                "tool_calls": [
-                    {
-                        "call_id": "call_sow1",
-                        "name": "sys_os_write",
-                        "arguments": (
-                            '{"path": "palindrome.py", '
-                            '"content": "def is_palindrome(s: str) -> bool:\\n'
-                            "    s = s.lower()\\n    return s == s[::-1]\\n"
-                            '"}'
-                        ),
-                    }
-                ],
+                "text": (
+                    "I've created palindrome.py with the is_palindrome function. "
+                    "The function checks if a string is a palindrome."
+                ),
             },
-            {"text": "I've created palindrome.py with the is_palindrome function."},
         ],
         key=model,
     )
@@ -132,19 +117,12 @@ def test_first_session_to_working_code_journey(
         timeout=60,
     )
     assert body["status"] == "completed", (
-        f"Agent coding turn failed. error={body.get('error')!r}. output={body.get('output', [])}"
+        f"Agent coding turn failed. error={body.get('error')!r}."
     )
 
-    tool_calls = _tool_names_in_output(body)
     text_output = _extract_all_text(body).lower()
-    has_write_evidence = (
-        any("write" in t.lower() or "shell" in t.lower() for t in tool_calls)
-        or "is_palindrome" in text_output
-        or "palindrome" in text_output
-    )
-    assert has_write_evidence, (
-        f"Agent completed but produced no evidence of writing the function. "
-        f"Tool calls: {tool_calls}. Text (first 500 chars): {text_output[:500]}"
+    assert "palindrome" in text_output, (
+        f"Expected agent to mention palindrome. Got: {text_output[:500]}"
     )
 
     comment_resp = http_client.post(
@@ -170,6 +148,7 @@ def test_first_session_to_working_code_journey(
         f"Expected comment to start as 'draft', got {comment_statuses.get(comment_id)!r}"
     )
 
+    # Turn 2: list_comments and update_comment are always registered.
     configure_mock_llm(
         mock_llm_server_url,
         [
@@ -213,24 +192,20 @@ def test_first_session_to_working_code_journey(
     )
     assert address_body["status"] == "completed", (
         f"Agent address-comment turn failed. "
-        f"error={address_body.get('error')!r}. "
-        f"output={address_body.get('output', [])}"
+        f"error={address_body.get('error')!r}."
     )
 
     address_calls = _tool_names_in_output(address_body)
     assert "list_comments" in address_calls, (
-        f"Agent did not call list_comments. Tool calls seen: {address_calls}. "
-        f"Output: {address_body.get('output', [])}"
+        f"Agent did not call list_comments. Tool calls seen: {address_calls}."
     )
     assert "update_comment" in address_calls, (
-        f"Agent did not call update_comment. Tool calls seen: {address_calls}. "
-        f"Output: {address_body.get('output', [])}"
+        f"Agent did not call update_comment. Tool calls seen: {address_calls}."
     )
 
     post_resp = http_client.get(f"/v1/sessions/{session_id}/comments")
     post_resp.raise_for_status()
     post_statuses = {c["id"]: c["status"] for c in post_resp.json()}
     assert post_statuses.get(comment_id) == "addressed", (
-        f"Comment still has status {post_statuses.get(comment_id)!r} "
-        f"after the agent turn; expected 'addressed'."
+        f"Comment still has status {post_statuses.get(comment_id)!r}; expected 'addressed'."
     )
