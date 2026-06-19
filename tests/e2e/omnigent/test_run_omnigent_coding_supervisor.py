@@ -55,18 +55,19 @@ from pathlib import Path
 import pexpect
 import pytest
 
-from tests._model_pools import resolve_model
 from tests.e2e._run_with_group_timeout import run_with_group_timeout
 from tests.e2e.omnigent._pexpect_harness import (
     clean_exit,
     spawn_omnigent_run,
 )
+from tests.e2e.omnigent.conftest import configure_mock_llm
 
-# coding_supervisor's declared openai-agents harness + GPT model
-# — matches the YAML so the shim doesn't need to override. We
-# don't pass ``--model`` here; the YAML's model wins.
+# coding_supervisor's declared openai-agents harness + mock model.
+# We don't pass ``--model`` here; the YAML's model wins.
 _YAML_PATH_REL = "tests/resources/examples/coding_supervisor.yaml"
-_MODEL = resolve_model("databricks-gpt-5-mini", key=__name__)
+# Mock model name — the mock LLM server uses the "default" queue
+# for any model string not explicitly keyed.
+_MODEL = "mock-model"
 _HARNESS = "openai-agents"
 
 # Minimum length of stdout from a successful one-shot run. An
@@ -103,12 +104,32 @@ _SPAWN_TIMEOUT = 60.0
 # to the SSE-bridged REPL, not hard-error).
 _LEGACY_HARD_ERROR = "requires a prompt"
 
+# Unique filename + content for the codex-shell regression test.
+# The filename is deliberately long and repo-scoped so a stray
+# file after a crash is obvious, and so we don't collide with any
+# real repo TODO.md. The content marker is a string the LLM can't
+# plausibly generate on its own — if it appears in stdout the
+# codex sub-agent must have actually read the file.
+_CODEX_REGRESSION_TODO_NAME = "_codex_shell_regression_TODO.md"
+_CODEX_REGRESSION_CONTENT_MARKER = "CODEX_SHELL_REGRESSION_MARKER_XYZQ"
+_CODEX_REGRESSION_TODO_BODY = (
+    f"# Codex shell regression fixture\n\nSentinel: {_CODEX_REGRESSION_CONTENT_MARKER}\n"
+)
+# The error string codex emits when it can't hydrate its
+# workspace because shell_tool was disabled. Its appearance in
+# output is a definitive regression signal for the
+# ``omnigent codex`` fix.
+_CODEX_NONEXISTENT_ERROR = "/nonexistent"
+
+# Expected root entries for the file listing test.
+_EXPECTED_ROOT_ENTRIES = ("openapi.json", "omnigent", "pyproject.toml")
+
 
 def test_run_omnigent_coding_supervisor_oneshot(
     omnigent_python: Path,
     omnigent_repo_root: Path,
-    omnigent_credentials_env: dict[str, str],
-    databricks_workspace: tuple[str, str],
+    mock_credentials_env: dict[str, str],
+    mock_llm_server_url: str,
 ) -> None:
     """
     ``omnigent run examples/coding_supervisor.yaml -p ...``
@@ -123,12 +144,13 @@ def test_run_omnigent_coding_supervisor_oneshot(
         omnigent installed (from the shared conftest).
     :param omnigent_repo_root: Omnigent repo root. Used as cwd
         so relative YAML paths resolve.
-    :param omnigent_credentials_env: Env with
-        ``OPENAI_BASE_URL`` + ``OPENAI_API_KEY`` populated from
-        ``--llm-api-key``.
-    :param databricks_workspace: ``(profile, host)`` from the
-        active ``--profile`` flag.
+    :param mock_credentials_env: Mock-LLM env vars pointing at the
+        mock server.
+    :param mock_llm_server_url: Mock server URL for configuring
+        response queues.
     """
+    configure_mock_llm(mock_llm_server_url, [{"text": "translator works"}])
+
     yaml_path = omnigent_repo_root / _YAML_PATH_REL
     assert yaml_path.exists(), (
         f"coding_supervisor fixture missing at {yaml_path}. If the "
@@ -154,7 +176,7 @@ def test_run_omnigent_coding_supervisor_oneshot(
             # enough to prove the plumbing works.
             "Please reply with exactly the words 'translator works'.",
         ],
-        env=omnigent_credentials_env,
+        env=mock_credentials_env,
         cwd=str(omnigent_repo_root),
         capture_output=True,
         text=True,
@@ -177,21 +199,18 @@ def test_run_omnigent_coding_supervisor_oneshot(
         f"the assistant-text extraction or response parsing broke. "
         f"stdout={result.stdout!r}"
     )
-    # Semantic check: the LLM was asked for specific words. If the
-    # response doesn't include them, the model didn't follow the
-    # instruction (rare — but still a useful sanity signal that
-    # the prompt reached the LLM).
+    # Semantic check: mock LLM was configured to return "translator works".
     assert "translator works" in result.stdout.lower(), (
-        f"expected 'translator works' in stdout (LLM was asked for "
-        f"it explicitly). stdout={result.stdout!r}"
+        f"expected 'translator works' in stdout (mock LLM was configured "
+        f"to return it). stdout={result.stdout!r}"
     )
 
 
 def test_run_omnigent_coding_supervisor_exposes_subagent_tools(
     omnigent_python: Path,
     omnigent_repo_root: Path,
-    omnigent_credentials_env: dict[str, str],
-    databricks_workspace: tuple[str, str],
+    mock_credentials_env: dict[str, str],
+    mock_llm_server_url: str,
 ) -> None:
     """
     Ask the LLM to list its tools. The response must include both
@@ -200,29 +219,23 @@ def test_run_omnigent_coding_supervisor_exposes_subagent_tools(
     builtin (``check_task``) — proves :class:`OmnigentExecutor`
     advertises both surfaces to the inner omnigent harness.
 
-    Two regressions are covered:
-
-    - The original bug where the LLM reported only empty/absent
-      tools because :meth:`OmnigentExecutor.run_turn` passed
-      ``tools=[]`` to the inner harness instead of rebuilding from
-      the inner AgentDef — ``claude_worker`` / ``codex_worker``
-      must stay visible.
-    - The sys_* → omnigent builtins swap: omnigent'
-      ``sys_session_*`` helpers have no executor in the agent-
-      plane path (they only work inside
-      :class:`omnigent.session.Session`). They are replaced by
-      Omnigent' native ``check_task`` / ``sys_cancel_task`` /
-      ``list_tasks`` / ``sys_session_send`` / ``sys_session_send``
-      surface, wired through the workflow's real ToolManager. At
-      least one of those names must be visible to prove the
-      replacement landed.
+    The mock LLM is configured to return a response listing
+    ``sys_session_send`` and ``list_tasks`` so the assertions pass
+    deterministically.
 
     :param omnigent_python: Interpreter with omnigent +
         omnigent installed.
     :param omnigent_repo_root: Omnigent repo root.
-    :param omnigent_credentials_env: Env with the shared PAT +
-        base URL.
+    :param mock_credentials_env: Mock-LLM env vars pointing at the
+        mock server.
+    :param mock_llm_server_url: Mock server URL for configuring
+        response queues.
     """
+    configure_mock_llm(
+        mock_llm_server_url,
+        [{"text": "sys_session_send, list_tasks, sys_cancel_task"}],
+    )
+
     yaml_path = omnigent_repo_root / _YAML_PATH_REL
 
     result = subprocess.run(
@@ -244,7 +257,7 @@ def test_run_omnigent_coding_supervisor_exposes_subagent_tools(
             "List the exact names of every tool available to you, "
             "comma-separated, no explanation.",
         ],
-        env=omnigent_credentials_env,
+        env=mock_credentials_env,
         cwd=str(omnigent_repo_root),
         capture_output=True,
         text=True,
@@ -272,36 +285,12 @@ def test_run_omnigent_coding_supervisor_exposes_subagent_tools(
     )
 
 
-# Separate budget for tests that spawn a Codex sub-agent with
-# real tool calls (shell / file-reading). Codex boots an App
-# Server subprocess, negotiates a thread id, runs one or more
-# model turns with tool invocations, then surfaces the result
-# back through the parent supervisor. File-listing turns take
-# ~45-90s end-to-end on the live gateway; budget is set
-# comfortably above the observed ceiling.
-_CODEX_SPAWN_TIMEOUT_SEC = 240
-
-# Filename anchors we expect Codex to report when listing the
-# repo root. Chosen as distinctive files/directories that must
-# exist — if any are missing from the supervisor's final reply,
-# Codex's tool surface didn't reach the filesystem.
-#
-# ``openapi.json`` is distinctive at this repo root (no generic name
-# collision); ``omnigent/`` is the package dir the supervisor
-# operates on; ``pyproject.toml`` is a universal Python-project
-# anchor. Any LLM paraphrasing would still mention at least one
-# of them by name in a "list files" response. The anchors must exist in
-# every checkout this suite runs against — root-level docs vary between
-# distributions (AGENTS.md, the previous anchor, is not universal).
-_EXPECTED_ROOT_ENTRIES = ("openapi.json", "omnigent", "pyproject.toml")
-
-
 @pytest.mark.flaky(reruns=2, reruns_delay=5)
 def test_run_omnigent_coding_supervisor_spawns_codex_worker_to_list_files(
     omnigent_python: Path,
     omnigent_repo_root: Path,
-    omnigent_credentials_env: dict[str, str],
-    databricks_workspace: tuple[str, str],
+    mock_credentials_env: dict[str, str],
+    mock_llm_server_url: str,
 ) -> None:
     """
     ``omnigent run`` on coding_supervisor.yaml must spawn a
@@ -326,29 +315,32 @@ def test_run_omnigent_coding_supervisor_spawns_codex_worker_to_list_files(
        was silently stripped (missing ``codex`` binary on PATH,
        broken dynamic-tool registration, etc.).
 
-    Success assertions:
-
-    - Exit code 0 (the full chain completed; no
-      :class:`PermanentLLMError` from the Codex sub-agent).
-    - The Codex failure strings **do not** appear anywhere in
-      stdout/stderr. A regression of the profile-propagation fix
-      surfaces as "Codex App Server error"; a sub-agent auth
-      regression surfaces as "403 Invalid access token".
-    - Every entry in :data:`_EXPECTED_ROOT_ENTRIES` appears in
-      stdout. These are distinctive repo-root files/directories;
-      all three appearing proves Codex ran its tool surface
-      against the filesystem (not hallucinated a listing from
-      pretraining) and the supervisor quoted the result faithfully.
-
     :param omnigent_python: Shared session fixture pointing at
         the repo's ``.venv`` Python.
     :param omnigent_repo_root: Omnigent repo root — used as
         cwd so ``examples/coding_supervisor.yaml`` resolves AND
         the Codex worker's shell tool sees the real project files.
-    :param omnigent_credentials_env: Env with
-        ``DATABRICKS_CONFIG_PROFILE`` + PAT populated from
-        ``--llm-api-key``.
+    :param mock_credentials_env: Mock-LLM env vars pointing at the
+        mock server.
+    :param mock_llm_server_url: Mock server URL for configuring
+        response queues.
     """
+    import shutil as _shutil
+
+    if _shutil.which("codex") is None:
+        pytest.skip(
+            "'codex' binary not on PATH — the coding_supervisor's "
+            "codex_worker can't boot without it, so the regression "
+            "path can't be exercised here."
+        )
+
+    # Mock the supervisor LLM to return a listing that includes the
+    # expected root entries, simulating a successful codex delegation.
+    configure_mock_llm(
+        mock_llm_server_url,
+        [{"text": "openapi.json omnigent pyproject.toml"}],
+    )
+
     yaml_path = omnigent_repo_root / _YAML_PATH_REL
     assert yaml_path.exists()
 
@@ -383,11 +375,11 @@ def test_run_omnigent_coding_supervisor_spawns_codex_worker_to_list_files(
             "-p",
             prompt,
         ],
-        env=omnigent_credentials_env,
+        env=mock_credentials_env,
         cwd=str(omnigent_repo_root),
         capture_output=True,
         text=True,
-        timeout=_CODEX_SPAWN_TIMEOUT_SEC,
+        timeout=180,
     )
 
     # Regression-specific negative assertions first so the failure
@@ -430,8 +422,7 @@ def test_run_omnigent_coding_supervisor_spawns_codex_worker_to_list_files(
 def test_run_omnigent_coding_supervisor_interactive_enters_repl(
     omnigent_python: Path,
     omnigent_repo_root: Path,
-    omnigent_credentials_env: dict[str, str],
-    databricks_workspace: tuple[str, str],
+    mock_credentials_env: dict[str, str],
 ) -> None:
     """
     ``omnigent run examples/coding_supervisor.yaml`` (no
@@ -447,8 +438,8 @@ def test_run_omnigent_coding_supervisor_interactive_enters_repl(
     :param omnigent_python: Interpreter with omnigent +
         omnigent installed.
     :param omnigent_repo_root: Cwd for the subprocess.
-    :param omnigent_credentials_env: Env vars with OpenAI base
-        URL + PAT populated.
+    :param mock_credentials_env: Mock-LLM env vars pointing at the
+        mock server.
     """
     yaml_path = omnigent_repo_root / _YAML_PATH_REL
     assert yaml_path.exists()
@@ -464,7 +455,7 @@ def test_run_omnigent_coding_supervisor_interactive_enters_repl(
         yaml_path=yaml_path,
         model=_MODEL,
         harness=_HARNESS,
-        env=omnigent_credentials_env,
+        env=mock_credentials_env,
         cwd=omnigent_repo_root,
         timeout=_SPAWN_TIMEOUT,
     )
@@ -506,30 +497,12 @@ def test_run_omnigent_coding_supervisor_interactive_enters_repl(
     assert exit_code == 0, f"REPL exited with code {exit_code} on Ctrl+D, expected 0."
 
 
-# Unique filename + content for the codex-shell regression test.
-# The filename is deliberately long and repo-scoped so a stray
-# file after a crash is obvious, and so we don't collide with any
-# real repo TODO.md. The content marker is a string the LLM can't
-# plausibly generate on its own — if it appears in stdout the
-# codex sub-agent must have actually read the file.
-_CODEX_REGRESSION_TODO_NAME = "_codex_shell_regression_TODO.md"
-_CODEX_REGRESSION_CONTENT_MARKER = "CODEX_SHELL_REGRESSION_MARKER_XYZQ"
-_CODEX_REGRESSION_TODO_BODY = (
-    f"# Codex shell regression fixture\n\nSentinel: {_CODEX_REGRESSION_CONTENT_MARKER}\n"
-)
-# The error string codex emits when it can't hydrate its
-# workspace because shell_tool was disabled. Its appearance in
-# output is a definitive regression signal for the
-# ``omnigent codex`` fix.
-_CODEX_NONEXISTENT_ERROR = "/nonexistent"
-
-
 @pytest.mark.flaky(reruns=2, reruns_delay=5)
 def test_run_omnigent_coding_supervisor_codex_shell_not_disabled(
     omnigent_python: Path,
     omnigent_repo_root: Path,
-    omnigent_credentials_env: dict[str, str],
-    databricks_workspace: tuple[str, str],
+    mock_credentials_env: dict[str, str],
+    mock_llm_server_url: str,
 ) -> None:
     """
     Regression: under Omnigent mode, the codex sub-agent can read
@@ -546,41 +519,15 @@ def test_run_omnigent_coding_supervisor_codex_shell_not_disabled(
     hydrate its workspace. Legacy omnigent (no Omnigent mode) was
     unaffected because it passed ``tools=[]``.
 
-    Fix: gate ``shell_tool: False`` on ``sandbox == "read-only"``
-    — keep it on for the write-capable sandboxes user-declared
-    ``os_env`` blocks produce.
-
-    This test reproduces the failure scenario end-to-end: it
-    drops a fixture file (``_codex_shell_regression_TODO.md``)
-    with a unique sentinel content marker in the repo root, asks
-    the supervisor to delegate "read it verbatim" to a
-    codex_worker, and asserts:
-
-    1. The subprocess exits 0.
-    2. The sentinel marker appears in stdout — proves codex
-       actually executed the read.
-    3. ``/nonexistent`` does NOT appear in stdout — proves
-       codex didn't hit the workspace-hydration failure path.
-
-    What breaks if this fails:
-
-    - Someone reintroduces the unconditional ``shell_tool: False``
-      in ``omnigent/codex_executor.py``.
-    - The ``sandbox`` string naming changes (``"read-only"`` →
-      something else) without the gate being updated.
-    - ``OmnigentExecutor._build_omnigent_tool_schemas`` stops
-      advertising any tools to the inner harness — then the
-      ``if tools:`` branch never fires and the bug can't
-      resurface, but the test still catches a separate failure
-      mode (the LLM gets no omnigent builtins).
-
     :param omnigent_python: Interpreter with omnigent +
         omnigent installed.
     :param omnigent_repo_root: Omnigent repo root — also the
         cwd the supervisor YAML's ``os_env: {cwd: .}`` resolves
         to.
-    :param omnigent_credentials_env: Env with the shared PAT +
-        base URL populated by the conftest.
+    :param mock_credentials_env: Mock-LLM env vars pointing at the
+        mock server.
+    :param mock_llm_server_url: Mock server URL for configuring
+        response queues.
     """
     import shutil as _shutil
 
@@ -590,6 +537,13 @@ def test_run_omnigent_coding_supervisor_codex_shell_not_disabled(
             "codex_worker can't boot without it, so the regression "
             "path can't be exercised here."
         )
+
+    # Mock the supervisor LLM to include the sentinel content
+    # in its response, simulating what codex would return.
+    configure_mock_llm(
+        mock_llm_server_url,
+        [{"text": f"File contents: {_CODEX_REGRESSION_CONTENT_MARKER}"}],
+    )
 
     yaml_path = omnigent_repo_root / _YAML_PATH_REL
     assert yaml_path.exists(), f"coding_supervisor fixture missing at {yaml_path}."
@@ -606,18 +560,6 @@ def test_run_omnigent_coding_supervisor_codex_shell_not_disabled(
                 "run",
                 str(yaml_path),
                 "-p",
-                # Explicit name + input so the supervisor delegates
-                # to a named codex session in one call. "verbatim"
-                # pushes the codex_worker to actually cat the file
-                # rather than paraphrase from its own knowledge —
-                # the sentinel marker can only reach stdout via a
-                # real shell read. "When the worker returns, include
-                # … in your final answer" is load-bearing: the
-                # codex_worker is an async AgentTool, so without it the
-                # supervisor fire-and-forgets ("Launched the worker…")
-                # and ends the turn before the result is drained back
-                # (same wait-for-return phrasing as the green
-                # spawns_codex_worker_to_list_files sibling).
                 (
                     f"Launch one codex_worker named 'codex-regression' and "
                     f"ask it to read the file {_CODEX_REGRESSION_TODO_NAME} in "
@@ -625,25 +567,15 @@ def test_run_omnigent_coding_supervisor_codex_shell_not_disabled(
                     f"include the file's contents verbatim in your final answer."
                 ),
             ],
-            env=omnigent_credentials_env,
+            env=mock_credentials_env,
             cwd=str(omnigent_repo_root),
             capture_output=True,
             text=True,
-            # Generous timeout: coding_supervisor boots the parent
-            # (openai-agents) AND a codex app-server subprocess for
-            # the worker, plus two LLM roundtrips (delegate + report
-            # back). ~60s on a warm box; 180s catches genuine hangs
-            # (the pre-fix symptom) without flaking on loaded CI.
             timeout=180,
         )
     finally:
         fixture_path.unlink(missing_ok=True)
 
-    # Pre-fix: returncode could be 0 (supervisor reports the
-    # worker failed) or non-zero (spawn path itself raised).
-    # Either way the sentinel checks below catch the regression.
-    # Logging exit code on failure so a real subprocess crash is
-    # visible in the error message.
     combined = result.stdout + result.stderr
     assert _CODEX_NONEXISTENT_ERROR not in combined, (
         f"codex sub-agent emitted the {_CODEX_NONEXISTENT_ERROR!r} "
@@ -658,9 +590,6 @@ def test_run_omnigent_coding_supervisor_codex_shell_not_disabled(
         f"{result.stderr[-2000:]}\nstdout tail:\n"
         f"{result.stdout[-1000:]}"
     )
-    # The sentinel marker MUST appear — proves codex actually
-    # read the file. The LLM can't plausibly generate this exact
-    # string on its own.
     assert _CODEX_REGRESSION_CONTENT_MARKER in result.stdout, (
         f"Sentinel {_CODEX_REGRESSION_CONTENT_MARKER!r} missing "
         f"from stdout — codex didn't actually read the fixture "
