@@ -286,15 +286,12 @@ class ElicitationRequest:
         e.g. ``"request"`` or ``"tool_call"``. Surfaces in the
         elicitation event's extras so the renderer can label the
         prompt.
-    :param policy_name: Name of the deciding (first-in-YAML-order)
-        ASKing policy. Drives per-policy ``ask_timeout`` lookup,
-        observability, and the renderer's "policy X says..." label.
-        e.g. ``"pii_redact"``.
-    :param policy_names: Names of ALL ASKing policies that contributed
-        to this elicitation. ``None`` when only one policy asked (the
-        common case). Surfaces in the elicitation event's extras so
-        the renderer can label each policy's ask separately.
-        e.g. ``["pii_redact", "cost_gate"]``.
+    :param policy_names: Names of all ASKing policies that contributed
+        to this elicitation, in YAML order. Always a non-empty list.
+        ``policy_name`` is a computed property returning
+        ``policy_names[0]`` — existing callers that read
+        ``.policy_name`` work without change.
+        e.g. ``["pii_redact"]`` or ``["pii_redact", "cost_gate"]``.
     :param content_preview: Truncated snapshot of the content being
         gated. Lets a human reviewer see what they're approving
         without overwhelming the UI on a 50 KB payload. Surfaces in
@@ -303,10 +300,18 @@ class ElicitationRequest:
 
     message: str
     phase: str
-    policy_name: str
+    policy_names: list[str]
     content_preview: str
     requested_schema: dict[str, Any] = field(default_factory=dict)
-    policy_names: list[str] | None = None
+
+    @property
+    def policy_name(self) -> str:
+        """First ASKing policy name.
+
+        Derived from ``policy_names[0]`` so callers that read
+        ``.policy_name`` work without change.
+        """
+        return self.policy_names[0] if self.policy_names else ""
 
 
 @dataclass
