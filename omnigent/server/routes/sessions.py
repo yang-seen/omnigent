@@ -7564,8 +7564,7 @@ async def _forward_event_to_runner(
         )
 
         _unresolved = [
-            b for b in forwarded_data["content"]
-            if isinstance(b, dict) and "file_id" in b
+            b for b in forwarded_data["content"] if isinstance(b, dict) and "file_id" in b
         ]
         if _unresolved:
             try:
