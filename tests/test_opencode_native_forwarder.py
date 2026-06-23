@@ -120,19 +120,38 @@ async def test_each_assistant_message_gets_its_own_response_id() -> None:
     assert response_ids == ["msg_a", "msg_b"], "each turn must get its own response_id"
 
 
-async def test_user_text_part_is_not_posted_as_assistant() -> None:
-    """A user-role message's text part is never mirrored (the client echoes it)."""
+async def test_user_text_part_is_mirrored_before_the_assistant() -> None:
+    """The forwarder is the transcript source: it posts the user message too.
+
+    For native-server harnesses omnigent persists no separate user item, so the
+    forwarder must mirror the user message (role=user) — posted eagerly so it
+    precedes its assistant reply (correct chat ordering). Deduped by part id.
+    """
     server, opencode = _RecordingServerClient(), _FakeOpenCodeClient()
     fwd = _forwarder(server, opencode)
     await fwd.handle_event(_event("message.updated", info={"id": "msg_u", "role": "user"}))
+    user_part = _event(
+        "message.part.updated",
+        part={"id": "prt_u", "messageID": "msg_u", "type": "text", "text": "my prompt"},
+    )
+    await fwd.handle_event(user_part)
+    await fwd.handle_event(user_part)  # snapshot repeat must not double-post
+    # Then the assistant reply for the same turn.
+    await fwd.handle_event(_event("message.updated", info={"id": "msg_a", "role": "assistant"}))
     await fwd.handle_event(
         _event(
             "message.part.updated",
-            part={"id": "prt_u", "messageID": "msg_u", "type": "text", "text": "my prompt"},
+            part={"id": "prt_a", "messageID": "msg_a", "type": "text", "text": "hello"},
         )
     )
     await fwd.handle_event(_event("session.idle"))
-    assert [b for _u, b in server.posts if b["type"] == "external_conversation_item"] == []
+
+    items = [b["data"] for _u, b in server.posts if b["type"] == "external_conversation_item"]
+    roles = [it["item_data"]["role"] for it in items if it["item_type"] == "message"]
+    assert roles == ["user", "assistant"], f"expected user before assistant, got {roles}"
+    user_item = next(it for it in items if it["item_data"]["role"] == "user")
+    assert user_item["item_data"]["content"][0]["text"] == "my prompt"
+    assert user_item["response_id"] == "msg_u"
 
 
 async def test_tool_part_posts_function_call_and_output() -> None:

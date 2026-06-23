@@ -174,7 +174,10 @@ class OpenCodeNativeForwarder:
                     # Pre-mark the keys the live handlers check so a resume
                     # never re-posts already-finalized text / tool parts.
                     if part.get("type") == "text" and isinstance(part_id, str):
+                        # Pre-mark both the assistant-finalize and user-message
+                        # keys so a resume re-posts neither.
                         self.state.mark(self._key("text-final", part_id))
+                        self.state.mark(self._key("user-text", part_id))
                     if part.get("type") == "tool":
                         call_id = part.get("callID")
                         if isinstance(call_id, str):
@@ -322,6 +325,20 @@ class OpenCodeNativeForwarder:
             },
         )
 
+    async def _post_user_text(self, text: str, *, message_id: str | None) -> None:
+        """Persist a user message mirrored from the native transcript."""
+        await self._post_event(
+            _EXTERNAL_ITEM,
+            {
+                "item_type": "message",
+                "item_data": {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": text}],
+                },
+                "response_id": self._response_id(message_id),
+            },
+        )
+
     async def _post_tool_call(
         self, call_id: str, tool: str, arguments: dict[str, Any], *, message_id: str | None
     ) -> None:
@@ -394,7 +411,16 @@ class OpenCodeNativeForwarder:
             return
         part_type = part.get("type")
         if part_type == "text":
-            self._accumulate_text_part(part)
+            # A native-server forwarder is the SOLE source of the conversation
+            # transcript (omnigent persists no separate user item for these
+            # harnesses — mirrors codex-native). So the USER message must be
+            # posted here, BEFORE its assistant reply, or the chat shows the
+            # assistant turns with no/late user messages. Assistant text is
+            # accumulated and finalized on step/turn end.
+            if self._msg_role.get(str(part.get("messageID"))) == "user":
+                await self._post_user_text_part(part)
+            else:
+                self._accumulate_text_part(part)
         elif part_type == "tool":
             await self._handle_tool_part(part)
         elif part_type == "step-start":
@@ -424,6 +450,24 @@ class OpenCodeNativeForwarder:
         self._pending_text[part_id] = (
             message_id if isinstance(message_id, str) else None,
             text,
+        )
+
+    async def _post_user_text_part(self, part: Mapping[str, Any]) -> None:
+        """Post a user message immediately so it precedes its assistant reply.
+
+        Unlike assistant text (accumulated + flushed on step end), a user part
+        is complete on arrival and must land at its own earlier position, so we
+        post it eagerly, deduped by part id.
+        """
+        part_id = part.get("id")
+        text = part.get("text")
+        message_id = part.get("messageID")
+        if not isinstance(part_id, str) or not isinstance(text, str) or not text:
+            return
+        if not self.state.mark(self._key("user-text", part_id)):
+            return
+        await self._post_user_text(
+            text, message_id=message_id if isinstance(message_id, str) else None
         )
 
     async def _flush_pending_text(self) -> None:

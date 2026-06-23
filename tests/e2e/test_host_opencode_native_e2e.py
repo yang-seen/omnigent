@@ -96,6 +96,108 @@ def _poll_for_terminal(
     )
 
 
+def test_opencode_native_multiturn_item_order(
+    http_client: httpx.Client,
+    tmp_path: Path,
+    live_server: str,
+) -> None:
+    """DIAGNOSTIC: dump /items for a 3-turn conversation to inspect ordering.
+
+    Reproduces the reported web-chat bug (assistant messages clustered, user
+    messages out of order/missing). Sends 3 user turns through a real
+    host-bound opencode session and prints every persisted item's
+    role/position/response_id so we can see exactly how user vs assistant items
+    land. Asserts strict user/assistant interleaving.
+    """
+    resp = http_client.get("/v1/agents")
+    resp.raise_for_status()
+    agent_id = next(
+        (a["id"] for a in resp.json()["data"] if a["name"] == _OPENCODE_NATIVE_AGENT_NAME), None
+    )
+    assert agent_id is not None
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    daemon = _spawn_host_daemon(tmp_path=tmp_path, live_server=live_server)
+    try:
+        host_id = _online_host_id(http_client)
+        create = http_client.post(
+            "/v1/sessions",
+            json={
+                "agent_id": agent_id,
+                "host_id": host_id,
+                "workspace": str(workspace),
+                # gateway-valid model via opencode's openai provider (the daemon
+                # has OPENAI_BASE_URL/OPENAI_API_KEY pointed at the gateway).
+                "model_override": "openai/databricks-claude-sonnet-4-6",
+            },
+            timeout=60.0,
+        )
+        create.raise_for_status()
+        session_id = create.json()["id"]
+        _poll_for_terminal(
+            http_client,
+            session_id=session_id,
+            resource_id=terminal_resource_id("opencode", "main"),
+            timeout=90.0,
+        )
+
+        prompts = ["say ONE", "say TWO", "say THREE"]
+        for i, prompt in enumerate(prompts):
+            http_client.post(
+                f"/v1/sessions/{session_id}/events",
+                json={
+                    "type": "message",
+                    "data": {"role": "user", "content": [{"type": "input_text", "text": prompt}]},
+                },
+                timeout=30.0,
+            ).raise_for_status()
+            # Wait until at least i+1 assistant message items exist.
+            deadline = time.monotonic() + 120.0
+            while time.monotonic() < deadline:
+                data = http_client.get(
+                    f"/v1/sessions/{session_id}/items", params={"limit": 100, "order": "asc"}
+                ).json().get("data", [])
+                n_asst = sum(
+                    1
+                    for it in data
+                    if it.get("type") == "message" and it.get("role") == "assistant"
+                )
+                if n_asst >= i + 1:
+                    break
+                time.sleep(POLL_INTERVAL_S)
+
+        data = http_client.get(
+            f"/v1/sessions/{session_id}/items", params={"limit": 100, "order": "asc"}
+        ).json().get("data", [])
+        print("\n===ITEMS_DUMP_START===")
+        for it in data:
+            text = ""
+            for blk in it.get("content", []) or []:
+                if isinstance(blk, dict) and isinstance(blk.get("text"), str):
+                    text += blk["text"]
+            print(
+                f"pos={it.get('position')!s:>4} type={it.get('type')!s:18} "
+                f"role={it.get('role')!s:10} rid={str(it.get('response_id'))[:24]:24} "
+                f"text={text[:40]!r}"
+            )
+        print("===ITEMS_DUMP_END===\n")
+
+        roles = [
+            it.get("role")
+            for it in data
+            if it.get("type") == "message" and it.get("role") in ("user", "assistant")
+        ]
+        expected = ["user", "assistant", "user", "assistant", "user", "assistant"]
+        assert roles == expected, f"messages not interleaved by turn: {roles}"
+    finally:
+        daemon.terminate()
+        try:
+            daemon.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            daemon.kill()
+
+
 def test_opencode_native_builtin_registered_at_startup(http_client: httpx.Client) -> None:
     """The server auto-registers ``opencode-native-ui`` as a built-in agent."""
     resp = http_client.get("/v1/agents")
