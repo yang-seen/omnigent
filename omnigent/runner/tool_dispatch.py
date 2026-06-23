@@ -395,8 +395,8 @@ async def _execute_local_python_tool(
 ) -> str:
     if agent_spec is None:
         return f"Error: {tool_name} not in local dispatch table (no agent spec)"
+    manager = ToolManager(agent_spec, workdir=runner_workspace)
     try:
-        manager = ToolManager(agent_spec, workdir=runner_workspace)
         workspace = None
         if runner_workspace is not None and conversation_id is not None:
             workspace = runner_workspace / conversation_id
@@ -411,6 +411,8 @@ async def _execute_local_python_tool(
     except Exception as exc:
         _logger.exception("runner local Python tool dispatch failed for %s", tool_name)
         return f"Error: {type(exc).__name__}: {exc}"
+    finally:
+        manager.shutdown()
 
 
 # Cache of resolved callables keyed by dotted path. Avoids
@@ -1122,8 +1124,14 @@ async def _execute_subagent_tool(
         # Apply an allowlisted per-dispatch harness override. The sub-agent
         # spec must explicitly opt in via executor.config.allowed_harnesses,
         # and the requested harness must canonicalize into OMNIGENT_HARNESSES.
-        # The server create route re-enforces both (sessions can be created
-        # via API paths too), so this is the orchestrator-facing guard.
+        # NOTE: the server create route (``_validated_harness_override`` in
+        # server/routes/sessions.py) independently re-validates a session-create
+        # override against the GLOBAL ``OMNIGENT_HARNESSES`` (plus the omnigent
+        # executor-type rule), but it does NOT re-check the per-spec
+        # ``allowed_harnesses`` allowlist. So this orchestrator-dispatch check is
+        # the sole enforcement of that per-spec allowlist; a direct
+        # ``POST /v1/sessions`` harness_override is bounded only by the global
+        # allowlist.
         harness_override_canonical: str | None = None
         if harness_override is not None:
             from omnigent.spec._omnigent_compat import OMNIGENT_HARNESSES

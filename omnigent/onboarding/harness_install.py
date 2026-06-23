@@ -47,6 +47,10 @@ from omnigent.onboarding.provider_config import ANTHROPIC_FAMILY, OPENAI_FAMILY
 # first-run ``run`` flow falls back to it, so it has install metadata too.
 PI_KEY = "pi"
 
+# Qwen Code uses npm installation and has login/logout commands similar to
+# other coding CLIs. The binary name is ``qwen``.
+QWEN_KEY = "qwen"
+
 # Cursor authenticates against its own backend (``cursor-agent login`` /
 # ``CURSOR_API_KEY``) with no provider/gateway credential, and ships via a curl
 # installer rather than npm — so it carries an ``install_hint``, not a ``package``.
@@ -120,6 +124,19 @@ _HARNESS_INSTALL: dict[str, HarnessInstallSpec] = {
     ),
     PI_KEY: HarnessInstallSpec("Pi", "pi", "@earendil-works/pi-coding-agent"),
     OPENCODE_KEY: HarnessInstallSpec("OpenCode", "opencode", "opencode-ai"),
+    QWEN_KEY: HarnessInstallSpec(
+        "Qwen Code",
+        "qwen",
+        "@qwen-code/qwen-code",
+        # NB: deliberately no login/logout/status args. Qwen *removed* its
+        # ``auth`` subcommand and has no CLI login — ``qwen login`` doesn't
+        # exist and ``qwen auth status`` prints "auth has been removed" and
+        # exits 0 (which would make harness_cli_logged_in falsely report a
+        # login via its exit-code fallback). Auth is via OpenAI-compatible env
+        # vars or the interactive ``/auth`` command; the setup wizard handles
+        # that in ``_manage_qwen_harness``. Leaving these None keeps
+        # harness_login/logout/cli_logged_in no-ops for qwen.
+    ),
     CURSOR_KEY: HarnessInstallSpec(
         "Cursor",
         "cursor-agent",
@@ -138,17 +155,29 @@ _HARNESS_INSTALL: dict[str, HarnessInstallSpec] = {
 # :data:`_HARNESS_INSTALL` family key. Only the CLI-backed harnesses appear
 # here — the ones that cannot launch without a binary on ``PATH``:
 # ``claude-native`` wraps the ``claude`` CLI, ``codex-native`` the ``codex``
-# CLI, and ``pi`` / ``pi-native`` the ``pi`` CLI.
+# CLI, ``pi`` / ``pi-native`` the ``pi`` CLI, ``opencode-native`` the
+# ``opencode`` CLI, ``qwen`` / ``qwen-code`` the ``qwen`` CLI, and
+# ``cursor-native`` / ``native-cursor`` the ``cursor-agent`` CLI (the native
+# Cursor TUI, installed via Cursor's curl installer rather than npm — see its
+# ``install_hint``).
 # SDK-based harnesses run in-process and are deliberately absent, so they
 # resolve to "no CLI required": ``claude-sdk``, ``codex``, ``openai-agents-sdk``,
-# and ``cursor`` (which drives the ``cursor-sdk``
-# Python package over its own bundled bridge, NOT the ``cursor-agent`` CLI).
+# and the SDK ``cursor`` harness (which drives the ``cursor-sdk`` Python package
+# over its own bundled bridge, NOT the ``cursor-agent`` CLI).
 _HARNESS_NAME_TO_KEY: dict[str, str] = {
     "claude-native": ANTHROPIC_FAMILY,
     "codex-native": OPENAI_FAMILY,
     PI_KEY: PI_KEY,
     "pi-native": PI_KEY,
     "opencode-native": OPENCODE_KEY,
+    "cursor-native": CURSOR_KEY,
+    QWEN_KEY: QWEN_KEY,
+    # NB: only CANONICAL harness ids appear as keys (the descriptor-parity
+    # contract asserts ``_HARNESS_NAME_TO_KEY`` keys are cli-backed descriptor
+    # ids). Reversed aliases like ``native-cursor`` / ``qwen-code`` are folded
+    # to their canonical id by ``canonicalize_harness`` before any lookup here
+    # (sub-agent dispatch in tool_dispatch.py canonicalizes first), so they
+    # need no entry of their own.
 }
 
 
@@ -162,7 +191,16 @@ def required_cli_for_harness(harness: str) -> HarnessInstallSpec | None:
         ``PATH`` for *harness* to start; ``None`` for SDK-based / unknown
         harnesses that need no CLI binary.
     """
-    key = _HARNESS_NAME_TO_KEY.get(harness)
+    # ``_HARNESS_NAME_TO_KEY`` is keyed by CANONICAL harness ids only (the
+    # descriptor-parity contract). Resolve any alias/reversed-alias spelling
+    # (``native-cursor`` → ``cursor-native``, ``qwen-code`` → ``qwen``,
+    # ``native-opencode`` → ``opencode-native``) to its canonical id first so
+    # those spellings still find their CLI spec.
+    from omnigent.runtime.harness_descriptors import descriptor_for
+
+    descriptor = descriptor_for(harness)
+    canonical = descriptor.id if descriptor is not None else harness
+    key = _HARNESS_NAME_TO_KEY.get(canonical)
     return _HARNESS_INSTALL.get(key) if key is not None else None
 
 
@@ -188,6 +226,35 @@ def missing_harness_cli(harness: str) -> HarnessInstallSpec | None:
     if shutil.which(spec.binary) is not None:
         return None
     return spec
+
+
+def harness_setup_hint(harness: str | None) -> str:
+    """Return actionable remediation when *harness* can't launch on a machine.
+
+    Most CLI harnesses (``claude``/``codex``/``pi``) install via npm and a
+    model credential, both of which ``omnigent setup`` handles — so they route
+    there. But a harness whose CLI ships out-of-band (``cursor-agent``, via
+    Cursor's own curl installer rather than npm — it carries an ``install_hint``
+    and no ``package``) is **not** installed by ``omnigent setup``: pointing a
+    native-Cursor user there is a dead end, since setup only configures the
+    SDK-based ``cursor`` harness (``cursor-sdk`` + ``CURSOR_API_KEY``). For
+    those, name the vendor installer and the CLI's own login instead.
+
+    :param harness: An executor harness identifier, e.g. ``"cursor-native"``,
+        ``"claude-native"``, or ``"codex"``; ``None`` falls back to the
+        ``omnigent setup`` hint.
+    :returns: A remediation clause for the "harness not configured" message,
+        e.g. ``"install the cursor-agent CLI on that machine with `curl
+        https://cursor.com/install -fsS | bash`, then run `cursor-agent
+        login`"`` for native Cursor, or the ``omnigent setup`` hint otherwise.
+    """
+    spec = required_cli_for_harness(harness or "")
+    if spec is not None and spec.package is None and spec.install_hint:
+        login = ""
+        if spec.login_args:
+            login = f", then run `{spec.binary} {' '.join(spec.login_args)}`"
+        return f"install the {spec.binary} CLI on that machine with `{spec.install_hint}`{login}"
+    return "run `omnigent setup` on that machine to install the CLI and set a default credential"
 
 
 def harness_install_spec(key: str) -> HarnessInstallSpec | None:

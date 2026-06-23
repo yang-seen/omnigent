@@ -323,13 +323,16 @@ HARNESS_DESCRIPTORS: dict[str, HarnessDescriptor] = {
         # Native CLI override reaches the TUI at launch (is_native_harness →
         # harness_supports_model_override is True for any native harness).
         supports_model_override=True,
-        # Intentionally NO install_family_key / cli_binary: cursor-native is
-        # absent from ``_HARNESS_NAME_TO_KEY`` (cursor-agent ships via a curl
-        # installer and its auth lives under the ``cursor`` SDK family, not a
-        # native install-map entry), so it is not a cli-backed descriptor.
-        # cursor-agent gates its own tools inside its TUI — Omnigent does not
-        # intercept them, hence no permission API. See
-        # omnigent/inner/cursor_native_harness.py.
+        # Native Cursor wraps the ``cursor-agent`` CLI, so it IS cli-backed and
+        # is gated on that binary like claude-native / codex-native (matches the
+        # readiness fix in #774). cursor-agent ships via a curl installer rather
+        # than npm, hence ``install_hint`` not ``npm_package``. (Auth/login live
+        # under the ``cursor`` family; cursor-agent still gates its own tools
+        # inside the TUI, so Omnigent intercepts no permissions — no permission
+        # API. See omnigent/inner/cursor_native_harness.py.)
+        cli_binary="cursor-agent",
+        install_family_key="cursor",
+        install_hint="curl https://cursor.com/install -fsS | bash",
         wrapper_agent_name="cursor-native-ui",
         wrapper_label="cursor-native-ui",
         terminal_name="cursor",
@@ -346,6 +349,22 @@ HARNESS_DESCRIPTORS: dict[str, HarnessDescriptor] = {
         aliases=("agy", "google-antigravity"),
         supports_model_override=True,
         description="In-process Google Antigravity SDK harness.",
+    ),
+    "qwen": HarnessDescriptor(
+        id="qwen",
+        display_name="Qwen Code",
+        module="omnigent.inner.qwen_harness",
+        family="sdk",
+        aliases=("qwen-code",),
+        supports_model_override=True,
+        # CLI-backed (drives the ``qwen`` binary in ACP mode), gated on the
+        # binary like the other CLI harnesses. Auth is via OpenAI-compatible
+        # env vars / the interactive ``/auth`` command — no CLI login argv (see
+        # the install spec note in onboarding/harness_install.py).
+        cli_binary="qwen",
+        npm_package="@qwen-code/qwen-code",
+        install_family_key="qwen",
+        description="Qwen Code CLI harness (ACP mode).",
     ),
 }
 

@@ -153,3 +153,31 @@ def test_opencode_descriptor_is_registered() -> None:
 def test_opencode_aliases_resolve(alias: str) -> None:
     """OpenCode aliases canonicalize to the opencode-native id."""
     assert canonicalize_harness(alias) == "opencode-native"
+
+
+def test_vendored_openapi_schemas_exist_and_parse() -> None:
+    """A descriptor naming an ``openapi_schema`` points at a real, valid file.
+
+    The native-server client is hand-shaped from the pinned vendor OpenAPI,
+    so the fixture must actually ship in-tree (resolved relative to the
+    ``omnigent`` package root) — otherwise the descriptor reference is a dead
+    string and the client can silently drift from the documented contract.
+    """
+    import json
+    from pathlib import Path
+
+    import omnigent
+
+    pkg_root = Path(omnigent.__file__).resolve().parent
+    for descriptor in _DESCRIPTORS:
+        if descriptor.openapi_schema is None:
+            continue
+        schema_path = pkg_root / descriptor.openapi_schema
+        assert schema_path.is_file(), (
+            f"{descriptor.id} declares openapi_schema={descriptor.openapi_schema!r} "
+            f"but {schema_path} does not exist"
+        )
+        with schema_path.open() as fh:
+            doc = json.load(fh)
+        assert doc.get("openapi"), f"{schema_path} is not a valid OpenAPI document"
+        assert doc.get("paths"), f"{schema_path} declares no paths"
