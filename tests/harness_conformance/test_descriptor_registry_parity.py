@@ -149,7 +149,7 @@ def test_opencode_descriptor_is_registered() -> None:
     assert descriptor.supports_terminal_takeover is True
 
 
-@pytest.mark.parametrize("alias", ["native-opencode"])
+@pytest.mark.parametrize("alias", ["native-opencode", "opencode"])
 def test_opencode_aliases_resolve(alias: str) -> None:
     """OpenCode aliases canonicalize to the opencode-native id."""
     assert canonicalize_harness(alias) == "opencode-native"

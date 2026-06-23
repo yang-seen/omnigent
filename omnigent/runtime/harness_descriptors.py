@@ -225,7 +225,11 @@ HARNESS_DESCRIPTORS: dict[str, HarnessDescriptor] = {
         display_name="OpenCode",
         module="omnigent.inner.opencode_native_harness",
         family="native-server",
-        aliases=("native-opencode",),
+        # ``opencode`` is accepted as a friendly alias for the canonical
+        # ``opencode-native`` (there is no separate SDK ``opencode`` harness, so
+        # the bare name is free); ``native-opencode`` is the reversed spelling.
+        aliases=("native-opencode", "opencode"),
+        runtime_aliases=("opencode",),
         native_aliases=("native-opencode",),
         handles_tools_internally=True,
         supports_interrupt=True,

@@ -142,9 +142,10 @@ def test_configured_harness_map_covers_all_spellings(
         "antigravity",
         "agy",
         "google-antigravity",
-        # Native OpenCode harness + its user-facing alias.
+        # Native OpenCode harness + its user-facing aliases.
         "opencode-native",
         "native-opencode",
+        "opencode",
         # Qwen harnesses
         "qwen",
         "qwen-code",

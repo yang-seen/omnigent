@@ -55,10 +55,6 @@ _STATUS_IDLE = "idle"
 # Bound the dedupe set so a long-lived session can't grow it without limit.
 _MAX_DEDUPE_KEYS = 8192
 
-# OpenCode step "finish" reasons that mean the assistant turn is complete
-# (no further tool loop). Anything else (e.g. "tool-calls") keeps it busy.
-_TERMINAL_FINISH = frozenset({"stop", "end_turn", "completed", "length", "error", "aborted"})
-
 # Policy verdict resolver: receives a normalized policy input and returns a
 # verdict mapping (or None when no policy is configured / reachable).
 PolicyEvaluator = Callable[[Mapping[str, Any]], Awaitable[Mapping[str, Any] | None]]
@@ -152,6 +148,13 @@ class OpenCodeNativeForwarder:
         self._policy_evaluator = policy_evaluator
         self._default_decision = default_decision
         self.state = OpenCodeForwarderState()
+        # messageID -> role ("user"/"assistant"), learned from
+        # ``message.updated``. Only assistant text parts become durable chat
+        # items (a user part is already echoed by the client).
+        self._msg_role: dict[str, str] = {}
+        # partID -> latest full-text snapshot for in-flight assistant text
+        # parts, finalized (posted once) on ``step-finish`` / ``session.idle``.
+        self._pending_text: dict[str, str] = {}
 
     async def seed_dedupe_from_history(self) -> None:
         """
@@ -169,12 +172,26 @@ class OpenCodeNativeForwarder:
         for message in messages:
             info = message.get("info") if isinstance(message, Mapping) else None
             message_id = info.get("id") if isinstance(info, Mapping) else None
+            role = info.get("role") if isinstance(info, Mapping) else None
+            if isinstance(message_id, str) and isinstance(role, str):
+                self._msg_role[message_id] = role
             parts = message.get("parts") if isinstance(message, Mapping) else None
             if isinstance(parts, list):
                 for part in parts:
-                    part_id = part.get("id") if isinstance(part, Mapping) else None
+                    if not isinstance(part, Mapping):
+                        continue
+                    part_id = part.get("id")
                     if isinstance(part_id, str):
                         self.state.mark(self._key("part", part_id))
+                    # Pre-mark the keys the live handlers check so a resume
+                    # never re-posts already-finalized text / tool parts.
+                    if part.get("type") == "text" and isinstance(part_id, str):
+                        self.state.mark(self._key("text-final", part_id))
+                    if part.get("type") == "tool":
+                        call_id = part.get("callID")
+                        if isinstance(call_id, str):
+                            self.state.mark(self._key("tool-call", call_id))
+                            self.state.mark(self._key("tool-out", call_id))
             if isinstance(message_id, str):
                 self.state.mark(self._key("message", message_id))
 
@@ -359,101 +376,132 @@ class OpenCodeNativeForwarder:
 
     # --- per-event handlers ----------------------------------------------
 
-    async def _on_step_started(self, event: OpenCodeEvent) -> None:
-        """Handle ``session.next.step.started`` — turn begins."""
-        message_id = event.properties.get("assistantMessageID")
-        if isinstance(message_id, str) and self._bridge_dir is not None:
-            update_active_message_id(self._bridge_dir, message_id, status="busy")
-        await self._begin_turn_if_needed()
+    async def _on_message_updated(self, event: OpenCodeEvent) -> None:
+        """Handle ``message.updated`` — learn role; begin a turn for assistant.
 
-    async def _on_step_ended(self, event: OpenCodeEvent) -> None:
-        """Handle ``session.next.step.ended`` — turn may be complete."""
-        finish = event.properties.get("finish")
-        finish_token = ""
-        if isinstance(finish, str):
-            finish_token = finish.lower()
-        elif isinstance(finish, Mapping):
-            reason = finish.get("reason") or finish.get("type")
-            finish_token = str(reason).lower() if reason is not None else ""
-        if finish_token in _TERMINAL_FINISH or finish_token == "":
-            await self._end_turn()
-
-    async def _on_step_failed(self, event: OpenCodeEvent) -> None:
-        """Handle ``session.next.step.failed`` — surface + end turn."""
-        del event
-        await self._end_turn()
-
-    async def _on_text_delta(self, event: OpenCodeEvent) -> None:
-        """Handle ``session.next.text.delta`` — stream assistant text."""
-        delta = event.properties.get("delta")
-        if not isinstance(delta, str) or not delta:
+        opencode attaches text/tool parts to a message id; the role lives on
+        the message, not the part, so we cache it here to route parts.
+        """
+        info = event.properties.get("info")
+        if not isinstance(info, Mapping):
             return
-        text_id = event.properties.get("textID") or event.properties.get("assistantMessageID")
-        stream_id = self._key("text", str(text_id))
-        await self._begin_turn_if_needed()
-        await self._post_text_delta(stream_id, delta)
-
-    async def _on_text_ended(self, event: OpenCodeEvent) -> None:
-        """Handle ``session.next.text.ended`` — finalize assistant text."""
-        text = event.properties.get("text")
-        text_id = event.properties.get("textID") or event.properties.get("assistantMessageID")
-        if not isinstance(text, str) or not text:
+        message_id = info.get("id")
+        role = info.get("role")
+        if not isinstance(message_id, str) or not isinstance(role, str):
             return
-        if not self.state.mark(self._key("text-final", str(text_id))):
-            return
-        await self._post_assistant_text(text)
+        self._msg_role[message_id] = role
+        if role == "assistant":
+            if self._bridge_dir is not None:
+                update_active_message_id(self._bridge_dir, message_id, status="busy")
+            await self._begin_turn_if_needed()
 
-    async def _on_tool_called(self, event: OpenCodeEvent) -> None:
-        """Handle ``session.next.tool.called`` — mirror tool invocation."""
-        call_id = event.properties.get("callID")
-        tool = event.properties.get("tool")
+    async def _on_part_updated(self, event: OpenCodeEvent) -> None:
+        """Handle ``message.part.updated`` — text / tool / step-boundary parts."""
+        part = event.properties.get("part")
+        if not isinstance(part, Mapping):
+            return
+        part_type = part.get("type")
+        if part_type == "text":
+            self._accumulate_text_part(part)
+        elif part_type == "tool":
+            await self._handle_tool_part(part)
+        elif part_type == "step-start":
+            await self._begin_turn_if_needed()
+        elif part_type == "step-finish":
+            # A step's assistant text is complete once the step closes; flush
+            # it so text and tool items land in the chat in step order.
+            await self._flush_pending_text()
+
+    def _accumulate_text_part(self, part: Mapping[str, Any]) -> None:
+        """Record the latest full-text snapshot for an assistant text part.
+
+        ``message.part.updated`` carries the cumulative text each time, so we
+        keep the latest snapshot and finalize it once on step/turn end.
+        """
+        part_id = part.get("id")
+        text = part.get("text")
+        if not isinstance(part_id, str) or not isinstance(text, str):
+            return
+        # User-message text is echoed by the client; only assistant text
+        # becomes a durable chat item.
+        if self._msg_role.get(str(part.get("messageID"))) != "assistant":
+            return
+        self._pending_text[part_id] = text
+
+    async def _flush_pending_text(self) -> None:
+        """Finalize accumulated assistant text parts as durable chat items."""
+        for part_id, text in list(self._pending_text.items()):
+            self._pending_text.pop(part_id, None)
+            if not text:
+                continue
+            if not self.state.mark(self._key("text-final", part_id)):
+                continue
+            await self._post_assistant_text(text)
+
+    async def _handle_tool_part(self, part: Mapping[str, Any]) -> None:
+        """Mirror an opencode tool part (call + result) as chat items.
+
+        opencode reports a tool as a single part whose ``state`` advances
+        ``pending`` → ``running`` → ``completed`` / ``error`` with ``input``
+        then ``output``; we post the call once its input is populated and the
+        output once it completes (deduped by ``callID``).
+        """
+        call_id = part.get("callID")
+        tool = part.get("tool")
+        state = part.get("state")
         if not isinstance(call_id, str) or not isinstance(tool, str):
             return
-        if not self.state.mark(self._key("tool-call", call_id)):
+        if not isinstance(state, Mapping):
             return
-        raw_input = event.properties.get("input")
-        arguments = raw_input if isinstance(raw_input, dict) else {"input": raw_input}
+        raw_input = state.get("input")
+        arguments = raw_input if isinstance(raw_input, dict) else {}
+        if arguments and self.state.mark(self._key("tool-call", call_id)):
+            await self._begin_turn_if_needed()
+            await self._post_tool_call(call_id, tool, arguments)
+        status = state.get("status")
+        if status == "completed" and self.state.mark(self._key("tool-out", call_id)):
+            await self._post_tool_output(call_id, _tool_output_text(state))
+        elif status == "error" and self.state.mark(self._key("tool-out", call_id)):
+            error = state.get("error")
+            await self._post_tool_output(call_id, f"[error] {error}" if error else "[error]")
+
+    async def _on_part_delta(self, event: OpenCodeEvent) -> None:
+        """Handle ``message.part.delta`` — stream assistant text live.
+
+        Deltas are ephemeral (the server publishes them without persisting);
+        the durable chat item is the finalized text posted by
+        :meth:`_flush_pending_text`.
+        """
+        if event.properties.get("field") != "text":
+            return
+        delta = event.properties.get("delta")
+        part_id = event.properties.get("partID")
+        if not isinstance(delta, str) or not delta or not isinstance(part_id, str):
+            return
         await self._begin_turn_if_needed()
-        await self._post_tool_call(call_id, tool, arguments)
+        await self._post_text_delta(self._key("text", part_id), delta)
 
-    async def _on_tool_success(self, event: OpenCodeEvent) -> None:
-        """Handle ``session.next.tool.success`` — mirror tool result."""
-        call_id = event.properties.get("callID")
-        if not isinstance(call_id, str):
-            return
-        if not self.state.mark(self._key("tool-out", call_id)):
-            return
-        output = _tool_output_text(event.properties)
-        await self._post_tool_output(call_id, output)
+    async def _on_session_status(self, event: OpenCodeEvent) -> None:
+        """Handle ``session.status`` — surface the running edge."""
+        status = event.properties.get("status")
+        status_type = status.get("type") if isinstance(status, Mapping) else status
+        if status_type == "busy":
+            await self._begin_turn_if_needed()
 
-    async def _on_tool_failed(self, event: OpenCodeEvent) -> None:
-        """Handle ``session.next.tool.failed`` — mirror tool error."""
-        call_id = event.properties.get("callID")
-        if not isinstance(call_id, str):
-            return
-        if not self.state.mark(self._key("tool-out", call_id)):
-            return
-        error = event.properties.get("error")
-        output = f"[error] {error}" if error is not None else "[error]"
-        await self._post_tool_output(call_id, output)
-
-    async def _on_interrupt_requested(self, event: OpenCodeEvent) -> None:
-        """Handle ``session.next.interrupt.requested`` — cancelling."""
+    async def _on_session_idle(self, event: OpenCodeEvent) -> None:
+        """Handle ``session.idle`` — finalize text and end the turn."""
         del event
-        await self._post_status("cancelling")
-
-    async def _on_prompt_promoted(self, event: OpenCodeEvent) -> None:
-        """Handle ``session.next.prompt.promoted`` — queued prompt active."""
-        del event
-        await self._begin_turn_if_needed()
+        await self._flush_pending_text()
+        await self._end_turn()
 
     async def _on_session_error(self, event: OpenCodeEvent) -> None:
-        """Handle ``session.error`` — log + end turn."""
+        """Handle ``session.error`` — log, finalize, end turn."""
         _logger.warning(
             "OpenCode session error for session=%s: %s",
             self._session_id,
             event.properties.get("error"),
         )
+        await self._flush_pending_text()
         await self._end_turn()
 
     async def _on_permission_asked(self, event: OpenCodeEvent) -> None:
@@ -510,19 +558,24 @@ class OpenCodeNativeForwarder:
         return map_verdict_to_decision(verdict)
 
 
-def _tool_output_text(properties: Mapping[str, Any]) -> str:
+def _tool_output_text(state: Mapping[str, Any]) -> str:
     """
-    Extract a string tool output from a tool-success event.
+    Extract a string tool output from a completed tool part's ``state``.
 
-    :param properties: The ``session.next.tool.success`` properties.
+    :param state: The opencode tool part ``state`` (``output`` /
+        ``metadata.output``).
     :returns: A string suitable for ``function_call_output``.
     """
-    for key in ("content", "result", "structured"):
-        value = properties.get(key)
-        if isinstance(value, str) and value:
-            return value
-        if value is not None and not isinstance(value, str):
-            return json.dumps(value, ensure_ascii=True)
+    output = state.get("output")
+    if isinstance(output, str) and output:
+        return output
+    metadata = state.get("metadata")
+    if isinstance(metadata, Mapping):
+        meta_out = metadata.get("output")
+        if isinstance(meta_out, str) and meta_out:
+            return meta_out
+    if output is not None and not isinstance(output, str):
+        return json.dumps(output, ensure_ascii=True)
     return ""
 
 
@@ -530,16 +583,16 @@ def _tool_output_text(properties: Mapping[str, Any]) -> str:
 # resolves the method on the instance. Keys are OpenCode event ``type``
 # discriminators (see openapi.json Event* schemas).
 _HANDLERS: dict[str, Callable[[OpenCodeNativeForwarder, OpenCodeEvent], Awaitable[None]]] = {
-    "session.next.step.started": OpenCodeNativeForwarder._on_step_started,
-    "session.next.step.ended": OpenCodeNativeForwarder._on_step_ended,
-    "session.next.step.failed": OpenCodeNativeForwarder._on_step_failed,
-    "session.next.text.delta": OpenCodeNativeForwarder._on_text_delta,
-    "session.next.text.ended": OpenCodeNativeForwarder._on_text_ended,
-    "session.next.tool.called": OpenCodeNativeForwarder._on_tool_called,
-    "session.next.tool.success": OpenCodeNativeForwarder._on_tool_success,
-    "session.next.tool.failed": OpenCodeNativeForwarder._on_tool_failed,
-    "session.next.interrupt.requested": OpenCodeNativeForwarder._on_interrupt_requested,
-    "session.next.prompt.promoted": OpenCodeNativeForwarder._on_prompt_promoted,
+    # opencode 1.17.x is part-based: text/tool live on message PARTS, lifecycle
+    # on the message + session. (Verified against a real ``opencode serve``.)
+    "message.updated": OpenCodeNativeForwarder._on_message_updated,
+    "message.part.updated": OpenCodeNativeForwarder._on_part_updated,
+    "message.part.delta": OpenCodeNativeForwarder._on_part_delta,
+    "session.status": OpenCodeNativeForwarder._on_session_status,
+    "session.idle": OpenCodeNativeForwarder._on_session_idle,
     "session.error": OpenCodeNativeForwarder._on_session_error,
+    # Permission ask: 1.17.x emits ``permission.asked``; keep the ``v2`` spelling
+    # too so a point-release rename still routes through the policy gate.
+    "permission.asked": OpenCodeNativeForwarder._on_permission_asked,
     "permission.v2.asked": OpenCodeNativeForwarder._on_permission_asked,
 }

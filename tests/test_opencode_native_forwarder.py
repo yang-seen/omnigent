@@ -64,19 +64,29 @@ def _types(posts: list[tuple[str, dict[str, Any]]]) -> list[str]:
 async def test_text_delta_posts_output_text_delta() -> None:
     server, opencode = _RecordingServerClient(), _FakeOpenCodeClient()
     fwd = _forwarder(server, opencode)
-    await fwd.handle_event(_event("session.next.text.delta", textID="t1", delta="hello"))
-    # A status edge (running) plus the text delta.
+    await fwd.handle_event(
+        _event(
+            "message.part.delta", field="text", partID="prt_1", messageID="msg_1", delta="hello"
+        )
+    )
     assert "external_output_text_delta" in _types(server.posts)
     delta_post = next(b for _u, b in server.posts if b["type"] == "external_output_text_delta")
     assert delta_post["data"]["delta"] == "hello"
 
 
-async def test_text_ended_posts_assistant_message_and_dedupes() -> None:
+async def test_assistant_text_part_finalized_on_idle_and_dedupes() -> None:
     server, opencode = _RecordingServerClient(), _FakeOpenCodeClient()
     fwd = _forwarder(server, opencode)
-    ev = _event("session.next.text.ended", textID="t1", text="full answer")
-    await fwd.handle_event(ev)
-    await fwd.handle_event(ev)  # duplicate must not re-post
+    # The role lives on the message; the text on a text part of that message.
+    await fwd.handle_event(_event("message.updated", info={"id": "msg_1", "role": "assistant"}))
+    await fwd.handle_event(
+        _event(
+            "message.part.updated",
+            part={"id": "prt_1", "messageID": "msg_1", "type": "text", "text": "full answer"},
+        )
+    )
+    await fwd.handle_event(_event("session.idle"))
+    await fwd.handle_event(_event("session.idle"))  # duplicate flush must not re-post
     items = [b for _u, b in server.posts if b["type"] == "external_conversation_item"]
     assert len(items) == 1
     assert items[0]["data"]["item_type"] == "message"
@@ -84,69 +94,99 @@ async def test_text_ended_posts_assistant_message_and_dedupes() -> None:
     assert items[0]["data"]["item_data"]["content"][0]["text"] == "full answer"
 
 
-async def test_tool_called_posts_function_call() -> None:
+async def test_user_text_part_is_not_posted_as_assistant() -> None:
+    """A user-role message's text part is never mirrored (the client echoes it)."""
     server, opencode = _RecordingServerClient(), _FakeOpenCodeClient()
     fwd = _forwarder(server, opencode)
+    await fwd.handle_event(_event("message.updated", info={"id": "msg_u", "role": "user"}))
     await fwd.handle_event(
         _event(
-            "session.next.tool.called",
-            callID="call_1",
-            tool="bash",
-            input={"command": "ls"},
+            "message.part.updated",
+            part={"id": "prt_u", "messageID": "msg_u", "type": "text", "text": "my prompt"},
         )
     )
-    item = next(
-        b
-        for _u, b in server.posts
-        if b["type"] == "external_conversation_item" and b["data"]["item_type"] == "function_call"
-    )
-    assert item["data"]["item_data"]["name"] == "bash"
-    assert item["data"]["item_data"]["call_id"] == "call_1"
-    assert '"command": "ls"' in item["data"]["item_data"]["arguments"]
+    await fwd.handle_event(_event("session.idle"))
+    assert [b for _u, b in server.posts if b["type"] == "external_conversation_item"] == []
 
 
-async def test_tool_success_posts_function_call_output() -> None:
+async def test_tool_part_posts_function_call_and_output() -> None:
     server, opencode = _RecordingServerClient(), _FakeOpenCodeClient()
     fwd = _forwarder(server, opencode)
+    await fwd.handle_event(_event("message.updated", info={"id": "msg_1", "role": "assistant"}))
     await fwd.handle_event(
-        _event("session.next.tool.success", callID="call_1", content="file1\nfile2")
+        _event(
+            "message.part.updated",
+            part={
+                "id": "prt_t",
+                "messageID": "msg_1",
+                "type": "tool",
+                "callID": "call_1",
+                "tool": "bash",
+                "state": {
+                    "status": "completed",
+                    "input": {"command": "ls"},
+                    "output": "file1\nfile2",
+                },
+            },
+        )
     )
-    item = next(
-        b for _u, b in server.posts if b["data"].get("item_type") == "function_call_output"
-    )
-    assert item["data"]["item_data"]["call_id"] == "call_1"
-    assert item["data"]["item_data"]["output"] == "file1\nfile2"
+    call = next(b for _u, b in server.posts if b["data"].get("item_type") == "function_call")
+    assert call["data"]["item_data"]["name"] == "bash"
+    assert call["data"]["item_data"]["call_id"] == "call_1"
+    assert '"command": "ls"' in call["data"]["item_data"]["arguments"]
+    out = next(b for _u, b in server.posts if b["data"].get("item_type") == "function_call_output")
+    assert out["data"]["item_data"]["call_id"] == "call_1"
+    assert out["data"]["item_data"]["output"] == "file1\nfile2"
 
 
-async def test_tool_failed_posts_error_output() -> None:
+async def test_tool_part_dedupes_call_and_output_across_snapshots() -> None:
+    """The same tool part as running then completed posts the call/output once each."""
     server, opencode = _RecordingServerClient(), _FakeOpenCodeClient()
     fwd = _forwarder(server, opencode)
-    await fwd.handle_event(_event("session.next.tool.failed", callID="call_2", error="boom"))
+    await fwd.handle_event(_event("message.updated", info={"id": "msg_1", "role": "assistant"}))
+    base = {"id": "prt_t", "messageID": "msg_1", "type": "tool", "callID": "c1", "tool": "bash"}
+    running = {"status": "running", "input": {"command": "ls"}}
+    completed = {"status": "completed", "input": {"command": "ls"}, "output": "ok"}
+    await fwd.handle_event(_event("message.part.updated", part={**base, "state": running}))
+    await fwd.handle_event(_event("message.part.updated", part={**base, "state": completed}))
+    calls = [b for _u, b in server.posts if b["data"].get("item_type") == "function_call"]
+    outs = [b for _u, b in server.posts if b["data"].get("item_type") == "function_call_output"]
+    assert len(calls) == 1
+    assert len(outs) == 1
+
+
+async def test_tool_part_error_posts_error_output() -> None:
+    server, opencode = _RecordingServerClient(), _FakeOpenCodeClient()
+    fwd = _forwarder(server, opencode)
+    await fwd.handle_event(_event("message.updated", info={"id": "msg_1", "role": "assistant"}))
+    await fwd.handle_event(
+        _event(
+            "message.part.updated",
+            part={
+                "id": "prt_e",
+                "messageID": "msg_1",
+                "type": "tool",
+                "callID": "call_2",
+                "tool": "bash",
+                "state": {"status": "error", "input": {"command": "x"}, "error": "boom"},
+            },
+        )
+    )
     item = next(
         b for _u, b in server.posts if b["data"].get("item_type") == "function_call_output"
     )
     assert "boom" in item["data"]["item_data"]["output"]
 
 
-async def test_step_lifecycle_emits_running_then_idle() -> None:
+async def test_lifecycle_emits_running_then_idle() -> None:
     server, opencode = _RecordingServerClient(), _FakeOpenCodeClient()
     fwd = _forwarder(server, opencode)
-    await fwd.handle_event(_event("session.next.step.started", assistantMessageID="msg_1"))
-    await fwd.handle_event(_event("session.next.step.ended", finish="stop"))
+    await fwd.handle_event(_event("message.updated", info={"id": "msg_1", "role": "assistant"}))
+    await fwd.handle_event(_event("session.idle"))
     statuses = [
         b["data"]["status"] for _u, b in server.posts if b["type"] == "external_session_status"
     ]
     assert statuses == ["running", "idle"]
-
-
-async def test_interrupt_requested_emits_cancelling() -> None:
-    server, opencode = _RecordingServerClient(), _FakeOpenCodeClient()
-    fwd = _forwarder(server, opencode)
-    await fwd.handle_event(_event("session.next.interrupt.requested"))
-    statuses = [
-        b["data"]["status"] for _u, b in server.posts if b["type"] == "external_session_status"
-    ]
-    assert "cancelling" in statuses
 
 
 async def test_permission_asked_rejects_when_no_policy_wired() -> None:
@@ -257,8 +297,11 @@ async def test_event_for_other_session_ignored() -> None:
     await fwd.handle_event(
         OpenCodeEvent(
             id=None,
-            type="session.next.text.ended",
-            properties={"sessionID": "ses_OTHER", "textID": "t", "text": "x"},
+            type="message.part.updated",
+            properties={
+                "sessionID": "ses_OTHER",
+                "part": {"id": "p", "messageID": "m", "type": "text", "text": "x"},
+            },
             raw={},
         )
     )
