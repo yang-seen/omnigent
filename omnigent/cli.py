@@ -9351,6 +9351,74 @@ def _remove_credential(provider: str) -> str | None:
     return f"✓ Removed {label}"
 
 
+def _manage_opencode_harness() -> None:
+    """Run the level-2 drill-in for OpenCode: install the CLI; explain routing.
+
+    OpenCode (a native-server harness) has **no Omnigent-stored credential of
+    its own**. A session routes through whatever provider the bound agent
+    resolves: a Databricks gateway ``profile`` (the same one Claude/Codex use,
+    synthesized into opencode's per-session config) or OpenAI-/Anthropic-
+    compatible env vars opencode reads directly. So this drill-in installs the
+    pinned ``opencode`` CLI when missing and points at where the credential
+    actually lives, rather than storing a key here.
+
+    Like the other CLI-backed harnesses, a missing CLI gates the drill-in.
+
+    :returns: None. Side effect: may ``npm install`` the opencode CLI.
+    """
+    from omnigent.onboarding.harness_install import (
+        OPENCODE_KEY,
+        harness_cli_installed,
+        harness_install_command,
+        install_harness_cli,
+    )
+    from omnigent.onboarding.interactive import console, select
+
+    if not harness_cli_installed(OPENCODE_KEY):
+        cmd = " ".join(harness_install_command(OPENCODE_KEY))
+        choice = select(
+            "OpenCode's CLI isn't installed. Install it now?",
+            [
+                f"Yes — install ({cmd})",
+                "No — back to harnesses",
+                "I'll run it myself (show the command)",
+            ],
+            descriptions=[
+                f"Runs `{cmd}` (needs npm).",
+                "Return to the harness picker without installing.",
+                "Print the command so you can install it yourself, then return.",
+            ],
+            default=0,
+            clear_on_exit=True,
+        )
+        if choice == 0:
+            console.print(f"  [dim]Installing OpenCode — running `{cmd}`…[/dim]")
+            if install_harness_cli(OPENCODE_KEY):
+                console.print("  [green]✓ OpenCode installed[/green]")
+            else:
+                console.print(
+                    f"  [red]Install failed.[/red] Run it manually, then re-open: "
+                    f"[bold]{cmd}[/bold]"
+                )
+                return
+        elif choice == 2:  # run it yourself
+            console.print(f"  Install OpenCode with:\n    [bold]{cmd}[/bold]")
+            return
+        else:
+            return
+
+    # No Omnigent-stored credential: name where auth comes from, then return.
+    console.print(
+        "  [green]✓ OpenCode CLI installed.[/green]\n"
+        "  OpenCode routes through the provider its agent resolves — there is no\n"
+        "  separate OpenCode key to store here:\n"
+        "    • a Databricks gateway [bold]profile[/bold] (configure it under Claude/Codex or\n"
+        "      `omnigent setup --internal-beta`; it is synthesized into opencode's config), or\n"
+        "    • OpenAI-/Anthropic-compatible env vars (e.g. OPENAI_API_KEY + OPENAI_BASE_URL)."
+    )
+    select("OpenCode", ["← Back to harnesses"], default=0, clear_on_exit=True)
+
+
 def _run_configure_harnesses_interactive() -> None:
     """Run the interactive model/credential three-level picker.
 
@@ -9380,6 +9448,7 @@ def _run_configure_harnesses_interactive() -> None:
     )
     from omnigent.onboarding.harness_install import (
         CURSOR_KEY,
+        OPENCODE_KEY,
         QWEN_KEY,
         harness_cli_installed,
         harness_install_command,
@@ -9426,6 +9495,11 @@ def _run_configure_harnesses_interactive() -> None:
     # provider family (its v1 auth is the CLI's own env vars / ``/auth`` flow,
     # not an Omnigent credential), so it dispatches to its own drill-in.
     _QWEN = "\x00qwen"
+    # Sentinel marking the OpenCode row — native-server harness with no Omnigent
+    # credential of its own (it routes through the bound agent's Databricks
+    # gateway profile or ambient provider env), so it dispatches to its own
+    # binary-install/info drill-in.
+    _OPENCODE = "\x00opencode"
     families = [ANTHROPIC_FAMILY, OPENAI_FAMILY, PI_SURFACE]
     while True:
         config = _load_global_config()
@@ -9556,6 +9630,24 @@ def _run_configure_harnesses_interactive() -> None:
         options.append(f"  {qwen_sub}")
         selectable.append(False)
         row_target.append(None)
+        # OpenCode (native-server harness): readiness is just whether the
+        # ``opencode`` CLI is installed — it has no Omnigent-stored credential,
+        # routing through the bound agent's Databricks gateway profile or
+        # ambient provider env. Its drill-in installs the CLI and explains that.
+        opencode_installed = harness_cli_installed(OPENCODE_KEY)
+        options.append(f"{'  ' if opencode_installed else '[red]✗[/] '}OpenCode")
+        selectable.append(True)
+        row_target.append(_OPENCODE)
+        if not opencode_installed:
+            from rich.markup import escape as _rich_escape
+
+            opencode_cmd = _rich_escape(" ".join(harness_install_command(OPENCODE_KEY)))
+            opencode_sub = f"[dim]not installed — open to install ({opencode_cmd})[/]"
+        else:
+            opencode_sub = "[dim]installed — routes via the agent's gateway profile / env[/]"
+        options.append(f"  {opencode_sub}")
+        selectable.append(False)
+        row_target.append(None)
         options.append("Quit")
         selectable.append(True)
         row_target.append(_QUIT)
@@ -9576,6 +9668,8 @@ def _run_configure_harnesses_interactive() -> None:
             _manage_antigravity_harness()
         elif target == _QWEN:
             _manage_qwen_harness()
+        elif target == _OPENCODE:
+            _manage_opencode_harness()
         else:  # Quit row (or, defensively, a non-family row)
             return
 
