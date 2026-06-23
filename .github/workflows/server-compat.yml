@@ -18,7 +18,7 @@ name: Backwards-Compat
 #
 # Triggers:
 #   workflow_dispatch   manual; optional `versions` CSV overrides the set.
-#   schedule            every 4h; full pairwise over main + all non-rc tags.
+#   schedule            every 12h; full pairwise over main + all non-rc tags.
 
 on:
   workflow_dispatch:
@@ -28,8 +28,8 @@ on:
         required: false
         default: ""
   schedule:
-    # Every 4 hours.
-    - cron: "0 */4 * * *"
+    # Every 12 hours (00:00 and 12:00 UTC).
+    - cron: "0 */12 * * *"
 
 concurrency:
   group: backcompat-${{ github.workflow }}-${{ github.sha }}
