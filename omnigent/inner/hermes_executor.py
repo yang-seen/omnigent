@@ -8,10 +8,10 @@ turns to maintain conversational context across the Omnigent session without
 re-serialising the full history.
 
 Each turn yields text output as ``TextChunk`` / ``TurnComplete`` events.
-Omnigent policies are enforced on Hermes' native tool calls via a
-``--pre-tool-hook`` script that evaluates ``PHASE_TOOL_CALL`` against
-the Omnigent server before each tool execution (same contract as the
-Cursor and Claude Code native policy hooks).
+Omnigent policies are enforced on Hermes' native tool calls via Hermes'
+``pre_tool_call`` shell hook mechanism: a per-session ``HERMES_HOME``
+directory is created with a ``config.yaml`` that registers a policy hook
+script, matching how Codex uses a per-session ``CODEX_HOME``.
 
 Requirements:
     The ``hermes`` CLI must be installed and on PATH (or set via
@@ -39,12 +39,13 @@ Env vars read at construction:
 from __future__ import annotations
 
 import asyncio
-import contextlib
+import json
 import logging
 import os
 import re
 import shutil
 import sys
+import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -169,23 +170,31 @@ def _get_conversation_id() -> str | None:
     return None
 
 
-def _write_hermes_hook(cwd: str, hook_script_path: str, server_url: str, session_id: str) -> Path:
-    """Write a wrapper shell script for preToolUse policy enforcement.
+def _populate_hermes_home(
+    hermes_home: Path,
+    hook_script_path: str,
+    server_url: str,
+    session_id: str,
+) -> None:
+    """Populate a per-session ``HERMES_HOME`` with policy hook config.
 
-    The Hermes CLI ``--pre-tool-hook`` flag runs the command directly,
-    so we write a tiny shell wrapper that exports the env vars and
-    execs the Python hook script.
+    Creates a ``config.yaml`` that registers the Omnigent policy hook
+    as a ``pre_tool_call`` shell hook, and writes a wrapper script
+    that exports the server env vars before exec-ing the Python hook.
 
-    :param cwd: Workspace root directory.
+    This mirrors how Codex creates a per-session ``CODEX_HOME`` with
+    its own ``config.toml`` — Hermes scopes all state (config, sessions,
+    hooks, allowlist) to ``HERMES_HOME``.
+
+    :param hermes_home: The per-session HERMES_HOME directory.
     :param hook_script_path: Absolute path to ``hermes_policy_hook.py``.
-    :param server_url: Omnigent server URL, e.g. ``"http://127.0.0.1:6767"``.
+    :param server_url: Omnigent server URL.
     :param session_id: Conversation / session ID for policy evaluation.
-    :returns: The path to the written wrapper script.
     """
-    hooks_dir = Path(cwd) / ".hermes"
-    hooks_dir.mkdir(parents=True, exist_ok=True)
+    hermes_home.mkdir(parents=True, exist_ok=True)
 
-    wrapper = hooks_dir / "omnigent-hook.sh"
+    # Write the wrapper shell script that sets env vars and execs the hook.
+    wrapper = hermes_home / "omnigent-policy-hook.sh"
     wrapper.write_text(
         f"#!/bin/sh\n"
         f"export _OMNIGENT_SERVER_URL='{server_url}'\n"
@@ -193,7 +202,26 @@ def _write_hermes_hook(cwd: str, hook_script_path: str, server_url: str, session
         f"exec '{sys.executable}' '{hook_script_path}'\n"
     )
     wrapper.chmod(0o755)
-    return wrapper
+
+    # Write config.yaml with the pre_tool_call hook and auto-accept.
+    config = {
+        "hooks_auto_accept": True,
+        "hooks": {
+            "pre_tool_call": [
+                {
+                    "command": str(wrapper),
+                    "timeout": 60,
+                },
+            ],
+        },
+    }
+    config_path = hermes_home / "config.yaml"
+    # Use JSON for YAML-compatible output (JSON is valid YAML).
+    config_path.write_text(json.dumps(config, indent=2) + "\n")
+
+    # Pre-populate the allowlist so Hermes never prompts for consent.
+    allowlist_path = hermes_home / "shell-hooks-allowlist.json"
+    allowlist_path.write_text(json.dumps({str(wrapper): True}) + "\n")
 
 
 def _build_hermes_args(
@@ -202,7 +230,6 @@ def _build_hermes_args(
     *,
     model: str | None = None,
     session_id: str | None = None,
-    pre_tool_hook: str | None = None,
 ) -> list[str]:
     """
     Build the argument list for a Hermes subprocess call.
@@ -211,7 +238,6 @@ def _build_hermes_args(
     :param message: The user message text.
     :param model: Optional model override (``-m`` flag).
     :param session_id: Optional session ID to resume (``--resume``).
-    :param pre_tool_hook: Optional path to a pre-tool hook script.
     :returns: A list of CLI arguments.
     """
     args = [
@@ -227,8 +253,6 @@ def _build_hermes_args(
         args.extend(["-m", model])
     if session_id:
         args.extend(["--resume", session_id])
-    if pre_tool_hook:
-        args.extend(["--pre-tool-hook", pre_tool_hook])
     return args
 
 
@@ -245,6 +269,11 @@ class HermesExecutor(Executor):
     Each turn runs ``hermes chat -q "<message>" -Q --source tool`` as an
     ``asyncio.create_subprocess_exec`` subprocess, streams text output,
     and yields ``TextChunk`` / ``TurnComplete`` events.
+
+    A per-session ``HERMES_HOME`` directory is created with a
+    ``config.yaml`` that registers an Omnigent policy hook as a
+    Hermes ``pre_tool_call`` shell hook, enforcing ``PHASE_TOOL_CALL``
+    policies on all native Hermes tool calls.
     """
 
     def __init__(
@@ -283,26 +312,29 @@ class HermesExecutor(Executor):
         self._agent_name = agent_name
         # Per-session state: maps session_key -> hermes_session_id
         self._session_map: dict[str, str] = {}
-        # Pre-tool hook wrapper path (written once, reused across turns).
-        self._hook_wrapper: Path | None = None
-        self._setup_policy_hook()
+        # Per-session HERMES_HOME with policy hook config.
+        self._hermes_home: Path | None = None
+        self._setup_hermes_home()
 
-    def _setup_policy_hook(self) -> None:
-        """Write the pre-tool hook wrapper if the Omnigent server is available.
+    def _setup_hermes_home(self) -> None:
+        """Create a per-session ``HERMES_HOME`` with Omnigent policy hooks.
 
-        The hook script evaluates ``PHASE_TOOL_CALL`` policy via the
-        Omnigent server before each Hermes tool execution, enforcing
-        the same policy gate that other harnesses (Cursor, Claude Code)
-        use for native tool calls.
+        When the Omnigent server URL and conversation ID are available,
+        creates a temp directory with a ``config.yaml`` that registers the
+        Omnigent policy hook as a Hermes ``pre_tool_call`` shell hook.
+        The ``HERMES_HOME`` env var is passed to the subprocess so Hermes
+        reads this config instead of the user's ``~/.hermes/``.
+
+        Mirrors how Codex creates a per-session ``CODEX_HOME``.
         """
         server_url = os.environ.get("RUNNER_SERVER_URL", "")
         conv_id = _get_conversation_id()
-        if server_url and conv_id:
-            hook_script = str(Path(__file__).with_name("hermes_policy_hook.py"))
-            self._hook_wrapper = _write_hermes_hook(
-                self._cwd, hook_script, server_url, conv_id
-            )
-            _logger.debug("Hermes pre-tool hook installed: %s", self._hook_wrapper)
+        if not server_url or not conv_id:
+            return
+        self._hermes_home = Path(tempfile.mkdtemp(prefix="hermes_home_"))
+        hook_script = str(Path(__file__).with_name("hermes_policy_hook.py"))
+        _populate_hermes_home(self._hermes_home, hook_script, server_url, conv_id)
+        _logger.debug("Hermes per-session home: %s", self._hermes_home)
 
     def _hermes_session_id(self, session_key: str) -> str | None:
         """Return the stored Hermes session ID for an Omnigent session key."""
@@ -318,8 +350,9 @@ class HermesExecutor(Executor):
         The Hermes Agent CLI manages its own tool-calling loop internally.
         Tool-call requests/results are handled by Hermes, not bridged
         through Omnigent's tool dispatch.  Omnigent policies are enforced
-        via a ``--pre-tool-hook`` script that evaluates ``PHASE_TOOL_CALL``
-        against the Omnigent server before each tool execution.
+        via Hermes' native ``pre_tool_call`` shell hook that evaluates
+        ``PHASE_TOOL_CALL`` against the Omnigent server before each tool
+        execution.
         """
         return True
 
@@ -367,8 +400,12 @@ class HermesExecutor(Executor):
             message=user_text,
             model=model,
             session_id=hermes_sid,
-            pre_tool_hook=str(self._hook_wrapper) if self._hook_wrapper else None,
         )
+
+        # Build subprocess env with per-session HERMES_HOME for policy hooks.
+        proc_env: dict[str, str] | None = None
+        if self._hermes_home is not None:
+            proc_env = {**os.environ, "HERMES_HOME": str(self._hermes_home)}
 
         _logger.debug("Hermes subprocess: %s", " ".join(args))
 
@@ -378,6 +415,7 @@ class HermesExecutor(Executor):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=self._cwd,
+                env=proc_env,
             )
 
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
@@ -468,9 +506,8 @@ class HermesExecutor(Executor):
     async def close(self) -> None:
         """Release executor-wide resources."""
         self._session_map.clear()
-        # Best-effort cleanup of the hook wrapper script.
-        if self._hook_wrapper is not None:
-            with contextlib.suppress(OSError):
-                self._hook_wrapper.unlink(missing_ok=True)
-            self._hook_wrapper = None
+        # Best-effort cleanup of the per-session HERMES_HOME.
+        if self._hermes_home is not None:
+            shutil.rmtree(self._hermes_home, ignore_errors=True)
+            self._hermes_home = None
         await super().close()

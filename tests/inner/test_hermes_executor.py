@@ -13,6 +13,8 @@ patterns and error handling.
 from __future__ import annotations
 
 import asyncio
+import json
+import pathlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -28,6 +30,7 @@ from omnigent.inner.hermes_executor import (
     _build_hermes_args,
     _extract_last_user_message,
     _parse_session_id,
+    _populate_hermes_home,
     _strip_hermes_metadata,
 )
 
@@ -117,15 +120,58 @@ class TestUtils:
         idx = args.index("--resume")
         assert args[idx + 1] == "20260620_abc123"
 
-    def test_build_hermes_args_with_pre_tool_hook(self) -> None:
-        args = _build_hermes_args("hermes", "Hi", pre_tool_hook="/tmp/hook.sh")
-        assert "--pre-tool-hook" in args
-        idx = args.index("--pre-tool-hook")
-        assert args[idx + 1] == "/tmp/hook.sh"
 
-    def test_build_hermes_args_without_pre_tool_hook(self) -> None:
-        args = _build_hermes_args("hermes", "Hi")
-        assert "--pre-tool-hook" not in args
+# ---------------------------------------------------------------------------
+# HERMES_HOME population tests
+# ---------------------------------------------------------------------------
+
+
+class TestPopulateHermesHome:
+    """Tests for the per-session HERMES_HOME setup."""
+
+    def test_creates_config_with_hook(self, tmp_path: pathlib.Path) -> None:
+        """config.yaml contains the pre_tool_call hook registration."""
+        _populate_hermes_home(
+            tmp_path,
+            "/path/to/hook.py",
+            "http://127.0.0.1:6767",
+            "conv_test123",
+        )
+        config_path = tmp_path / "config.yaml"
+        assert config_path.exists()
+        config = json.loads(config_path.read_text())
+        assert config["hooks_auto_accept"] is True
+        hooks = config["hooks"]["pre_tool_call"]
+        assert len(hooks) == 1
+        assert "omnigent-policy-hook.sh" in hooks[0]["command"]
+
+    def test_creates_wrapper_script(self, tmp_path: pathlib.Path) -> None:
+        """Wrapper script exports env vars and execs the Python hook."""
+        _populate_hermes_home(
+            tmp_path,
+            "/path/to/hook.py",
+            "http://127.0.0.1:6767",
+            "conv_test123",
+        )
+        wrapper = tmp_path / "omnigent-policy-hook.sh"
+        assert wrapper.exists()
+        content = wrapper.read_text()
+        assert "http://127.0.0.1:6767" in content
+        assert "conv_test123" in content
+        assert "/path/to/hook.py" in content
+
+    def test_creates_allowlist(self, tmp_path: pathlib.Path) -> None:
+        """shell-hooks-allowlist.json is pre-populated."""
+        _populate_hermes_home(
+            tmp_path,
+            "/path/to/hook.py",
+            "http://127.0.0.1:6767",
+            "conv_test123",
+        )
+        allowlist_path = tmp_path / "shell-hooks-allowlist.json"
+        assert allowlist_path.exists()
+        allowlist = json.loads(allowlist_path.read_text())
+        assert any(allowlist.values())
 
 
 # ---------------------------------------------------------------------------
@@ -373,41 +419,36 @@ def test_handles_tools_internally(executor: HermesExecutor) -> None:
     assert executor.handles_tools_internally() is True
 
 
-def test_no_hook_without_server_env(executor: HermesExecutor) -> None:
-    """Without RUNNER_SERVER_URL, no hook wrapper is created."""
-    assert executor._hook_wrapper is None
+def test_no_hermes_home_without_server_env(executor: HermesExecutor) -> None:
+    """Without RUNNER_SERVER_URL, no per-session HERMES_HOME is created."""
+    assert executor._hermes_home is None
 
 
-def test_hook_setup_writes_wrapper(
+def test_hermes_home_setup_creates_config(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: object,
+    tmp_path: pathlib.Path,
 ) -> None:
-    """When server URL and conv ID are available, the hook wrapper is written."""
-    import pathlib
-
-    cwd = pathlib.Path(str(tmp_path))
+    """When server URL and conv ID are available, HERMES_HOME is populated."""
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:6767")
     monkeypatch.setattr("sys.argv", ["harness", "--conversation-id", "conv_test123"])
-    executor = HermesExecutor(hermes_path="/usr/bin/hermes-fake", cwd=str(cwd))
-    assert executor._hook_wrapper is not None
-    assert executor._hook_wrapper.exists()
-    content = executor._hook_wrapper.read_text()
-    assert "http://127.0.0.1:6767" in content
-    assert "conv_test123" in content
+    executor = HermesExecutor(hermes_path="/usr/bin/hermes-fake", cwd=str(tmp_path))
+    assert executor._hermes_home is not None
+    config_path = executor._hermes_home / "config.yaml"
+    assert config_path.exists()
+    config = json.loads(config_path.read_text())
+    assert config["hooks_auto_accept"] is True
+    assert "pre_tool_call" in config["hooks"]
 
 
 @pytest.mark.asyncio
-async def test_run_turn_passes_hook_to_subprocess(
+async def test_run_turn_passes_hermes_home_env(
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: object,
+    tmp_path: pathlib.Path,
 ) -> None:
-    """When the hook wrapper exists, --pre-tool-hook is passed to Hermes."""
-    import pathlib
-
-    cwd = pathlib.Path(str(tmp_path))
+    """When HERMES_HOME is set up, it's passed to the subprocess env."""
     monkeypatch.setenv("RUNNER_SERVER_URL", "http://127.0.0.1:6767")
     monkeypatch.setattr("sys.argv", ["harness", "--conversation-id", "conv_test456"])
-    executor = HermesExecutor(hermes_path="/usr/bin/hermes-fake", cwd=str(cwd))
+    executor = HermesExecutor(hermes_path="/usr/bin/hermes-fake", cwd=str(tmp_path))
 
     mock_process = MagicMock()
     mock_process.returncode = 0
@@ -426,5 +467,6 @@ async def test_run_turn_passes_hook_to_subprocess(
         ):
             events.append(event)
 
-        call_args, _ = mock_create.call_args
-        assert "--pre-tool-hook" in call_args
+        _, call_kwargs = mock_create.call_args
+        assert "env" in call_kwargs
+        assert call_kwargs["env"]["HERMES_HOME"] == str(executor._hermes_home)
