@@ -67,6 +67,7 @@ from .executor import (
     ToolCallRequest,
     ToolCallStatus,
     ToolSpec,
+    TurnCancelled,
     TurnComplete,
     classify_tool_result,
 )
@@ -87,6 +88,11 @@ _DEFAULT_CURSOR_MODEL = "auto"
 # can run for minutes) but finite, so a wedged tool surfaces a timeout error
 # instead of blocking the SDK's daemon callback thread forever.
 _TOOL_CALL_TIMEOUT_S = 1800.0
+# Maximum time (seconds) Cursor will wait for the preToolUse hook subprocess
+# to return.  Held at one day so the hook stays alive while the human responds
+# to the web-UI approval card — mirrors the server-side ``ask_timeout`` default
+# and the ``read_timeout`` used by ``cursor_policy_hook.py``.
+_HOOK_APPROVAL_TIMEOUT_S = 86400
 
 
 def _resolve_model(model: str | None) -> str:
@@ -333,16 +339,28 @@ def _tool_error_payload(text: str) -> dict[str, Any]:  # type: ignore[explicit-a
 def _encode_tool_result(result: Any) -> Any:  # type: ignore[explicit-any]
     """Encode a bridged-tool result for the SDK custom-tool return.
 
-    A dict carrying a truthy ``error`` or ``blocked`` is a dispatch failure or a
-    policy block (the shapes ``_bridge_one_dispatch`` / the policy layer return):
-    surface it as an ``isError`` payload so the model sees a failure — parity with
-    the claude-sdk handler, which the cursor harness otherwise diverged from by
-    delivering errors as ordinary, apparently-successful results. Everything else
-    returns its text: a ``str`` passthrough (the SDK wraps it as success), else
-    JSON.
+    A result that :func:`classify_tool_result` flags as anything other than
+    SUCCESS — a dispatch failure (``error``), a policy block (``blocked``), a
+    cancellation (``cancelled``), or any of those nested inside a
+    ``content`` / ``result`` / ``output`` / ``text`` envelope (or under a list
+    element) — is surfaced as an ``isError`` payload so the model sees a
+    failure. This pins the encoded result to the same ``classify_tool_result``
+    verdict the executor already reports for the observed ``ToolCallComplete``
+    event (see ``_sdk_message_to_events``), rather than the top-level-only
+    ``error`` / ``blocked`` check this used to share with the claude-sdk
+    handler. (The claude-sdk handler still uses that narrower top-level check,
+    so this is *not* parity with it.) Everything else returns its text: a
+    ``str`` passthrough (the SDK wraps it as success), else JSON.
+
+    Trade-off: because ``classify_tool_result`` maps ``{"cancelled": True}`` to
+    CANCELLED (not SUCCESS), a benign cancellation result — e.g. a successful
+    ``sys_cancel_async`` returning ``{"cancelled": True, ...}`` — is encoded as
+    ``isError``. This is intentional: a non-SUCCESS verdict is treated as a
+    failure here regardless of how benign the cancellation is.
     """
-    if isinstance(result, dict) and (result.get("error") or result.get("blocked")):
-        return _tool_error_payload(json.dumps(result, default=str))
+    if classify_tool_result(result).status != ToolCallStatus.SUCCESS:
+        encoded = result if isinstance(result, str) else json.dumps(result, default=str)
+        return _tool_error_payload(encoded)
     if isinstance(result, str):
         return result
     try:
@@ -404,7 +422,7 @@ def _write_cursor_hooks(cwd: str, hook_script_path: str, server_url: str, sessio
             "preToolUse": [
                 {
                     "command": command,
-                    "timeout": 30,
+                    "timeout": _HOOK_APPROVAL_TIMEOUT_S,
                 }
             ]
         },
@@ -470,6 +488,10 @@ class CursorExecutor(Executor):
         # pi / claude-sdk use). ``None`` on single-process / pre-turn paths
         # (then policy is a no-op).
         self._policy_evaluator: Callable[[str, dict[str, Any]], Awaitable[Any]] | None = None
+        # Installed by the runtime adapter; surfaces ASK verdicts to the
+        # user via the elicitation UI (approval prompt). ``None`` when no
+        # handler is wired (single-process / test paths → fail closed).
+        self._elicitation_handler: Callable[[str, dict[str, Any]], Awaitable[bool]] | None = None
 
     def supports_streaming(self) -> bool:
         return True
@@ -503,17 +525,49 @@ class CursorExecutor(Executor):
     async def _evaluate_native_tool_policy(
         self, name: str, args: dict[str, Any]
     ) -> dict[str, Any]:
-        """Evaluate PHASE_TOOL_CALL policy for a Cursor native tool.
+        """Gate a Cursor native tool call via policy check + user elicitation.
 
         Returns ``{"block": bool, "reason": str}``.
+
+        Two-stage gate that mirrors how :class:`claude_sdk_executor
+        <omnigent.inner.claude_sdk_executor.ClaudeSDKExecutor>` exposes
+        tool permission requests natively through ``ctx.elicit()``:
+
+        1. **Policy hard-deny**: if the policy evaluator returns
+           ``POLICY_ACTION_DENY``, block immediately without prompting the
+           user (the admin already decided).
+
+        2. **Native elicitation**: for any other outcome (ALLOW, ASK, or no
+           evaluator wired), invoke ``_elicitation_handler`` so the user can
+           review the call and approve or abort the remainder of the turn
+           from the web-UI approval card.
+
+        Cursor native tools execute inside the Cursor process, so they have
+        already started by the time the executor observes
+        ``ToolCallRequest(status="running")``.  This gate therefore cannot
+        block individual tool executions; it can only cancel the remainder of
+        the turn on denial.
         """
+        # Stage 1 — hard policy deny: block immediately, no elicitation.
         evaluator = self._policy_evaluator
-        if evaluator is None:
-            return {"block": False, "reason": ""}
-        verdict = await evaluator("PHASE_TOOL_CALL", {"name": name, "arguments": args})
-        action = getattr(verdict, "action", None)
-        if action == "POLICY_ACTION_DENY":
-            return {"block": True, "reason": getattr(verdict, "reason", "") or "blocked by policy"}
+        if evaluator is not None:
+            verdict = await evaluator("PHASE_TOOL_CALL", {"name": name, "arguments": args})
+            if getattr(verdict, "action", None) == "POLICY_ACTION_DENY":
+                return {
+                    "block": True,
+                    "reason": getattr(verdict, "reason", "") or "blocked by policy",
+                }
+
+        # Stage 2 — native elicitation: surface an approval card so the
+        # user can decide whether the rest of the turn should continue.
+        handler = self._elicitation_handler
+        if handler is not None:
+            logger.info("surfacing elicitation for native cursor tool %s", name)
+            approved = await handler(name, args)
+            if approved:
+                return {"block": False, "reason": ""}
+            return {"block": True, "reason": "turn aborted via web-UI elicitation"}
+
         return {"block": False, "reason": ""}
 
     # -- custom-tool bridge -------------------------------------------------
@@ -632,6 +686,12 @@ class CursorExecutor(Executor):
             local_kwargs: dict[str, Any] = {
                 "cwd": cwd,
                 "custom_tools": self._make_custom_tools(tools, loop) or None,
+                # Bypass cursor's own TUI approval prompts so native tool calls
+                # reach the executor's event stream and can be gated via the
+                # web-UI elicitation card (see _evaluate_native_tool_policy).
+                # Without this cursor may pause internally for its own approval
+                # before emitting a ToolCallRequest event.
+                "auto_review": True,
             }
             # Tell the SDK to read project-level settings (including hooks.json).
             if state.hooks_file is not None:
@@ -754,10 +814,16 @@ class CursorExecutor(Executor):
                         elif isinstance(event, ToolCallRequest):
                             tool_calls += 1
                             separate_next_text = True
-                            # Evaluate PHASE_TOOL_CALL for native tools.
-                            # Bridged tools are already gated by the
-                            # dispatch bridge — skip to avoid double eval.
-                            if not event.metadata.get("is_bridged") and policy_eval is not None:
+                            # Gate non-bridged (native) tool calls through
+                            # policy + elicitation.  Bridged tools are
+                            # already gated by the dispatch bridge.
+                            # Trigger when either the policy evaluator or
+                            # the elicitation handler is wired — the
+                            # latter alone (no server connection) still
+                            # surfaces an approval card natively.
+                            if not event.metadata.get("is_bridged") and (
+                                policy_eval is not None or self._elicitation_handler is not None
+                            ):
                                 gate = await self._evaluate_native_tool_policy(
                                     event.name, event.args if isinstance(event.args, dict) else {}
                                 )
@@ -768,7 +834,7 @@ class CursorExecutor(Executor):
                                         await run.cancel()
                                     yield event  # emit so observers see what was attempted
                                     reason = gate["reason"]
-                                    msg = f"Native tool {event.name!r} denied by policy: {reason}"
+                                    msg = f"Native tool {event.name!r} denied: {reason}"
                                     yield ExecutorError(message=msg)
                                     return
                         elif isinstance(event, ToolCallComplete):
@@ -788,11 +854,32 @@ class CursorExecutor(Executor):
             yield ExecutorError(message=f"cursor-sdk turn failed: {exc}", retryable=True)
             return
 
+        # RunResult.status is Literal["finished", "error", "cancelled",
+        # "expired"]. Only "finished" should commit a TurnComplete; the other
+        # terminal statuses are surfaced as errors/cancellation and tear the
+        # session down (the agent/bridge may be in an inconsistent state).
         status = getattr(result, "status", "")
         if status == "error":
             await self.close_session(session_key)
             detail = getattr(result, "result", "") or "cursor-sdk run reported an error"
             yield ExecutorError(message=f"cursor-sdk run error: {detail}", retryable=True)
+            return
+        if status == "expired":
+            await self.close_session(session_key)
+            detail = getattr(result, "result", "") or "cursor-sdk run expired"
+            yield ExecutorError(message=f"cursor-sdk run expired: {detail}", retryable=True)
+            return
+        if status == "cancelled":
+            await self.close_session(session_key)
+            yield TurnCancelled(reason="cursor-sdk run cancelled")
+            return
+        if status != "finished":
+            await self.close_session(session_key)
+            detail = getattr(result, "result", "") or "cursor-sdk run finished with unknown status"
+            yield ExecutorError(
+                message=f"cursor-sdk run returned non-finished status {status!r}: {detail}",
+                retryable=True,
+            )
             return
 
         # Prefer the streamed text we accumulated (which carries the paragraph
