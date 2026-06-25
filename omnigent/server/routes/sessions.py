@@ -8446,6 +8446,44 @@ async def _dispatch_session_event_to_runner(
             if isinstance(content, list) and content
             else None
         )
+        # ── Server-side routing for native terminal sessions ────────
+        # Same logic as the SDK path in _forward_event_to_runner: if
+        # the toggle is on and no model_override is set, call the
+        # judge and persist the chosen model on the conversation row.
+        # The native CLI reads model_override from the session.
+        if (
+            conv.model_override is None
+            and conv.cost_control_mode_override == "on"
+        ):
+            from omnigent.server.smart_routing import route_turn
+
+            _harness = _resolve_harness(conv)
+            _user_text = _extract_user_text_for_routing(body)
+            if _user_text:
+                _routed_model, _verdict = await route_turn(
+                    _harness, _user_text
+                )
+                if _routed_model is not None:
+                    try:
+                        await asyncio.to_thread(
+                            conversation_store.update_conversation,
+                            session_id,
+                            model_override=_routed_model,
+                        )
+                    except (OSError, ValueError):
+                        _logger.warning(
+                            "smart_routing: persist failed for "
+                            "native session=%s",
+                            session_id,
+                            exc_info=True,
+                        )
+                    await _emit_server_routing_decision(
+                        session_id,
+                        conversation_store,
+                        _routed_model,
+                        _verdict or {},
+                    )
+        # ────────────────────────────────────────────────────────────
         forwarded = False
         try:
             await _forward_native_terminal_message(
