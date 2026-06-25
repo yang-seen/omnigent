@@ -953,6 +953,7 @@ export function NewChatLandingScreen() {
   // fails closed (option hidden) until the boot probe resolves.
   const info = useServerInfo();
   const managedSandboxesEnabled = info !== "loading" && info.managed_sandboxes_enabled;
+  const smartRoutingEnabled = info !== "loading" && info.smart_routing_enabled;
   // Provider-named label for the sandbox option (e.g. "Modal Sandbox"),
   // falling back to the generic "New Sandbox" when the server names no
   // provider.
@@ -1401,11 +1402,6 @@ export function NewChatLandingScreen() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             agent_id: effectiveAgentId,
-            // Managed (cloud sandbox) creates let the server provision the
-            // host: the schema rejects host_id and path workspaces (and git
-            // needs a host_id). The optional repository inputs compose into
-            // the URL-form workspace the server clones; undefined (no repo)
-            // is dropped by JSON.stringify.
             ...(sandboxSelected
               ? {
                   host_type: "managed",
@@ -1442,14 +1438,8 @@ export function NewChatLandingScreen() {
                   : agentSupportsCursorMode && cursorExecMode !== CURSOR_NATIVE_DEFAULT_EXEC_MODE
                     ? (CURSOR_NATIVE_EXEC_MODES.find((m) => m.value === cursorExecMode)?.args ?? [])
                     : undefined,
-            // Cost-control switch from the "Cost Optimized" pill; polly-only
-            // (cost control is a polly feature) and omitted when unset so the
-            // session defers to the spec default.
-            cost_control_mode_override:
-              agent?.name === "polly" ? (costControlMode ?? undefined) : undefined,
-            // Brain-harness pick from the agent flyout. Omitted when the user
-            // kept the spec default (pickedHarness is null) so the session
-            // tracks the agent's declared harness.
+            // Smart routing toggle — server-side, available for any agent.
+            cost_control_mode_override: costControlMode ?? undefined,
             harness_override: pickedHarness ?? undefined,
           }),
         });
@@ -1725,11 +1715,7 @@ export function NewChatLandingScreen() {
                 />
               </div>
               <div className="flex items-center gap-0.5">
-                {/* Polly-only surface — cost control is a polly feature, so
-                    the toggle is hidden unless the selected agent is polly. */}
-                {/* Temporarily hidden (#3021): re-enable by removing the false gate. */}
-                {false && selectedAgent?.name === "polly" && (
-                  // Mode-only variant: no verdict can exist before the session does.
+                {smartRoutingEnabled && selectedAgent && (
                   <IntelligentModelControl value={costControlMode} onChange={setCostControlMode} />
                 )}
                 {agentList.length > 0 ? (
