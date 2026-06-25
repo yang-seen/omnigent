@@ -9724,10 +9724,15 @@ _FORK_HISTORY_NATIVE_HARNESSES: frozenset[str] = frozenset(
 
 # Native harnesses that carry FORK history as a text preamble (text-prefix
 # replay) instead of a rebuilt transcript. Fork-only — switch-agent does not
-# use this set, so switching into cursor still launches fresh. The runner
-# branches on the harness to choose preamble vs transcript rebuild (see
-# _auto_create_cursor_terminal / cursor_native_executor).
-_CURSOR_FORK_HISTORY_HARNESSES: frozenset[str] = frozenset({"cursor-native", "native-cursor"})
+# use this set, so switching into one still launches fresh. The runner branches
+# on the harness to choose preamble vs transcript rebuild (see
+# _auto_create_cursor_terminal / cursor_native_executor and the opencode
+# resume/fork rehydration in _auto_create_opencode_terminal). opencode-native
+# joins cursor here: opencode has no history-import API, so a fork seeds prior
+# context as a noReply preamble rather than a rebuilt session.
+_CURSOR_FORK_HISTORY_HARNESSES: frozenset[str] = frozenset(
+    {"cursor-native", "native-cursor", "opencode-native", "native-opencode"}
+)
 
 
 def _agent_carries_native_fork_history(agent: Agent) -> bool:
@@ -9760,16 +9765,17 @@ def _agent_carries_native_fork_history(agent: Agent) -> bool:
 
 
 def _agent_carries_cursor_fork_history(agent: Agent) -> bool:
-    """Return whether *agent* is cursor-native (carries FORK history via preamble).
+    """Return whether *agent*'s native harness carries FORK history via preamble.
 
-    Cursor's conversation is server-backed, so a fork can't seed a local store
-    for ``--resume``; instead the runner replays the prior turns as a text
-    preamble on the fork's first message. Fork-only — switch-agent does not call
-    this, so switching into cursor still launches fresh. Returns ``False`` when
-    the bundle can't be loaded.
+    Cursor's conversation is server-backed and opencode has no history-import
+    API, so neither can seed a local store for a rebuilt resume; instead the
+    runner replays prior turns as a text preamble on the fork (cursor: the
+    first message; opencode: a ``noReply`` context message). Fork-only —
+    switch-agent does not call this, so switching into one still launches fresh.
+    Returns ``False`` when the bundle can't be loaded.
 
     :param agent: The agent whose harness to classify.
-    :returns: ``True`` only for the cursor-native harness (either spelling).
+    :returns: ``True`` for the cursor-native / opencode-native harnesses.
     """
     from omnigent.harness_aliases import canonicalize_harness
 

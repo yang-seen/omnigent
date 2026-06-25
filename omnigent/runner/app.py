@@ -868,6 +868,10 @@ class _OpenCodeNativeLaunchConfig:
     :param terminal_launch_args: User pass-through OpenCode CLI args.
     :param model_override: Persisted model override, or ``None``.
     :param external_session_id: Existing OpenCode session id to resume.
+    :param fork_carry_history: ``True`` on a forked clone whose prior
+        transcript should be seeded as a text preamble
+        (``omnigent.fork.carry_history``); opencode has no native session to
+        clone, so the runner rehydrates from the copied Omnigent transcript.
     """
 
     workspace: Path
@@ -875,6 +879,7 @@ class _OpenCodeNativeLaunchConfig:
     terminal_launch_args: list[str] | None
     model_override: str | None
     external_session_id: str | None
+    fork_carry_history: bool = False
 
 
 async def _opencode_native_launch_config(
@@ -941,12 +946,22 @@ async def _opencode_native_launch_config(
         not isinstance(session_workspace, str) or not session_workspace
     ):
         raise RuntimeError(f"Invalid workspace for OpenCode session {session_id!r}.")
+    # On a forked clone, the server stamps carry-history (opencode has no native
+    # session to clone, so the runner rehydrates the copied transcript as a
+    # noReply preamble — same path as a lost-session resume).
+    from omnigent.stores.conversation_store import FORK_CARRY_HISTORY_LABEL_KEY
+
+    labels = snapshot.get("labels")
+    fork_carry_history = (
+        isinstance(labels, dict) and labels.get(FORK_CARRY_HISTORY_LABEL_KEY) == "1"
+    )
     return _OpenCodeNativeLaunchConfig(
         workspace=_codex_session_workspace(session_workspace),
         policy_server_url=_required_runner_env("RUNNER_SERVER_URL"),
         terminal_launch_args=terminal_launch_args,
         model_override=model_override,
         external_session_id=external_session_id,
+        fork_carry_history=fork_carry_history,
     )
 
 
@@ -1084,7 +1099,10 @@ async def _auto_create_opencode_terminal(
             if opencode_session_id is None:
                 created = await client.create_session({"title": f"omnigent:{session_id}"})
                 opencode_session_id = created.id
-                if resume_lost_history:
+                # Rehydrate prior context (text-prefix replay) when this is a
+                # lost-session resume OR a forked clone carrying history — both
+                # seed the copied Omnigent transcript as a noReply preamble.
+                if resume_lost_history or launch_config.fork_carry_history:
                     await _rehydrate_opencode_session_from_transcript(
                         opencode_client=client,
                         opencode_session_id=opencode_session_id,
