@@ -280,6 +280,62 @@ server from this repo:
 
 Then enter `http://localhost:8000` in the setup page.
 
+## Managing servers and hosting
+
+Beyond pointing at an already-running server, the shell can drive the local
+`omnigent` CLI to start a server and register this machine as a **host** (a
+machine that runs the agent work a server dispatches). Two concepts stay
+deliberately separate:
+
+- **Server** — the backend the webview talks to (local or remote).
+- **Host** — *this machine* executing agent work for a server. Because hosting
+  runs agent code, it is **opt-in**: the shell shows host status and connects
+  only when you explicitly enable it.
+
+### Detecting the CLI (setup page)
+
+On the setup page the shell probes for the `omnigent` binary —
+`settings.omnigent_path` first, then `PATH`, then the well-known install
+locations (`~/.local/bin`, `~/.cargo/bin`, Homebrew, `/usr/local/bin`). A
+GUI-launched app inherits a minimal `PATH`, which is why the install locations
+are probed directly. When the CLI isn't found, the page shows the install
+one-liner
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/omnigent-ai/omnigent/main/scripts/install_oss.sh | sh
+```
+
+and a field to point the app at the binary (typed or via a native file picker).
+A configured path is saved to `settings.json` (`omnigent_path`) only once it
+validates as a runnable `omnigent`. Connecting to a **remote** server never
+needs the CLI — only "Start locally" and hosting do.
+
+### Start locally
+
+**"Start a server on this machine"** runs `omnigent server start` (idempotent —
+reuses a healthy one) and then connects this window to its
+`http://127.0.0.1:<port>` URL through the normal connect flow.
+
+### Host status in-app
+
+Once connected, the SPA can read this machine's host status and toggle hosting
+through the JS bridge (`window.omnigentDesktop` →
+`getHostStatus` / `setHostEnabled` / `getServerStatus` / `setServerRunning` /
+`onHostStatusChanged`; typed wrappers in
+[`../src/lib/nativeBridge.ts`](../src/lib/nativeBridge.ts)). Status is read live
+from `omnigent host status --json` (connected = a live daemon process **and** an
+online host tunnel); the shell never caches it. Enabling hosting either adopts a
+daemon already serving that server (started by hand) or spawns
+`omnigent host --server <url>`. These control methods are gated to the window's
+**pinned origin**, like the badge/notification bridge.
+
+### Lifecycle
+
+The desktop **owns the host processes it starts**: quitting the app SIGTERMs
+them (and stops a local server it started), so closing the app disconnects this
+machine. A daemon the shell merely *adopted* (you started it in a terminal) is
+left running on quit.
+
 ## Passkeys (WebAuthn)
 
 External security keys (e.g. a YubiKey) work out of the box: Chromium's
