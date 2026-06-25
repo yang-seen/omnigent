@@ -172,7 +172,8 @@ class LLMRoutingClient:
                     }
                 ],
             )
-            verdict = json.loads(response.output_text)
+            text = response.output[0].content[0].text
+            verdict = json.loads(text)
         except Exception:  # noqa: BLE001  # fail-open: any LLM/parse error skips routing
             _logger.warning("LLMRoutingClient: judge call failed", exc_info=True)
             return None

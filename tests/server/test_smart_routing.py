@@ -26,10 +26,22 @@ from omnigent.server.smart_routing import (
 
 
 @dataclass
-class _FakeResponse:
-    """Minimal stub for a Responses API result."""
+class _FakeOutputText:
+    text: str
+    type: str = "output_text"
 
-    output_text: str
+
+@dataclass
+class _FakeMessageOutput:
+    content: list[_FakeOutputText]
+    type: str = "message"
+
+
+@dataclass
+class _FakeResponse:
+    """Minimal stub matching omnigent.llms.types.Response."""
+
+    output: list[_FakeMessageOutput]
 
 
 class _FakeLLMClient:
@@ -39,7 +51,10 @@ class _FakeLLMClient:
         self._verdict = verdict
 
     async def create(self, **kwargs: Any) -> _FakeResponse:
-        return _FakeResponse(output_text=json.dumps(self._verdict))
+        text = json.dumps(self._verdict)
+        return _FakeResponse(
+            output=[_FakeMessageOutput(content=[_FakeOutputText(text=text)])],
+        )
 
 
 class _FakeRoutingClient:
