@@ -50,6 +50,9 @@ _EXTERNAL_STATUS = "external_session_status"
 # Brackets opencode's own compaction; the server maps these to the
 # ``response.compaction.in_progress`` / ``…completed`` SSE the web UI renders.
 _EXTERNAL_COMPACTION_STATUS = "external_compaction_status"
+# Cumulative token/cost + context occupancy; the server prices it into the
+# session cost badge + context ring (same contract codex-native uses).
+_EXTERNAL_SESSION_USAGE = "external_session_usage"
 
 _STATUS_RUNNING = "running"
 _STATUS_IDLE = "idle"
@@ -87,6 +90,11 @@ class OpenCodeForwarderState:
         while len(self.seen) > _MAX_DEDUPE_KEYS:
             self.seen.popitem(last=False)
         return True
+
+
+def _int_or_zero(value: Any) -> int:
+    """Coerce an opencode token-count field to a non-negative int (0 otherwise)."""
+    return value if isinstance(value, int) and value >= 0 else 0
 
 
 class OpenCodeNativeForwarder:
@@ -146,6 +154,11 @@ class OpenCodeNativeForwarder:
         # ``step-finish`` / ``session.idle``. The messageID becomes the item's
         # per-turn ``response_id``.
         self._pending_text: dict[str, tuple[str | None, str]] = {}
+        # messageID -> latest {cost, tokens, model, model_id} for assistant
+        # messages (opencode reports cost/tokens per message). Summed into the
+        # cumulative usage posted as ``external_session_usage``.
+        self._usage_by_message: dict[str, dict[str, Any]] = {}
+        self._last_usage_signature: tuple[tuple[str, Any], ...] | None = None
 
     async def seed_dedupe_from_history(self) -> None:
         """
@@ -406,6 +419,8 @@ class OpenCodeNativeForwarder:
             if self._bridge_dir is not None:
                 update_active_message_id(self._bridge_dir, message_id, status="busy")
             await self._begin_turn_if_needed()
+            self._record_assistant_usage(message_id, info)
+            await self._post_session_usage()
 
     async def _on_part_updated(self, event: OpenCodeEvent) -> None:
         """Handle ``message.part.updated`` — text / tool / step-boundary parts."""
@@ -524,10 +539,89 @@ class OpenCodeNativeForwarder:
             await self._begin_turn_if_needed()
 
     async def _on_session_idle(self, event: OpenCodeEvent) -> None:
-        """Handle ``session.idle`` — finalize text and end the turn."""
+        """Handle ``session.idle`` — finalize text, post usage, end the turn."""
         del event
         await self._flush_pending_text()
+        await self._post_session_usage()
         await self._end_turn()
+
+    def _record_assistant_usage(self, message_id: str, info: Mapping[str, Any]) -> None:
+        """Cache the latest cost/tokens/model for an assistant message.
+
+        opencode reports ``cost`` (USD) + ``tokens`` per assistant message, so
+        keep the latest per messageID (overwriting in place as the message
+        streams) — :meth:`_post_session_usage` sums them into the cumulative.
+        """
+        tokens = info.get("tokens")
+        cost = info.get("cost")
+        if not isinstance(tokens, Mapping) and not isinstance(cost, (int, float)):
+            return
+        provider = info.get("providerID")
+        model_id = info.get("modelID")
+        model = (
+            f"{provider}/{model_id}"
+            if isinstance(provider, str) and isinstance(model_id, str)
+            else (model_id if isinstance(model_id, str) else None)
+        )
+        self._usage_by_message[message_id] = {
+            "cost": float(cost) if isinstance(cost, (int, float)) else 0.0,
+            "tokens": dict(tokens) if isinstance(tokens, Mapping) else {},
+            "model": model,
+            "model_id": model_id if isinstance(model_id, str) else None,
+        }
+
+    async def _post_session_usage(self) -> None:
+        """Post cumulative cost/tokens + context occupancy as external_session_usage.
+
+        Cumulative fields drive the web cost badge + cost-budget policy; the
+        latest message's input+cache tokens drive the context-occupancy ring
+        (denominator from the model's context window). Deduped so repeated
+        ``message.updated`` edges don't spam identical posts.
+        """
+        if not self._usage_by_message:
+            return
+        cum_cost = 0.0
+        cum_in = cum_out = cum_cache = 0
+        latest: dict[str, Any] | None = None
+        for entry in self._usage_by_message.values():
+            cum_cost += entry["cost"]
+            tokens = entry["tokens"]
+            cum_in += _int_or_zero(tokens.get("input"))
+            cum_out += _int_or_zero(tokens.get("output"))
+            cache = tokens.get("cache")
+            if isinstance(cache, Mapping):
+                cum_cache += _int_or_zero(cache.get("read"))
+            latest = entry
+        data: dict[str, Any] = {
+            "cumulative_cost_usd": round(cum_cost, 6),
+            "cumulative_input_tokens": cum_in,
+            "cumulative_output_tokens": cum_out,
+            "cumulative_cache_read_input_tokens": cum_cache,
+        }
+        if latest is not None:
+            lt = latest["tokens"]
+            lcache = lt.get("cache") if isinstance(lt.get("cache"), Mapping) else {}
+            ctx = (
+                _int_or_zero(lt.get("input"))
+                + _int_or_zero(lcache.get("read"))
+                + _int_or_zero(lcache.get("write"))
+            )
+            if ctx > 0:
+                data["context_tokens"] = ctx
+            if latest.get("model_id"):
+                try:
+                    from omnigent.llms.context_window import get_model_context_window
+
+                    data["context_window"] = get_model_context_window(latest["model_id"])
+                except Exception:  # noqa: BLE001 - context window is best effort.
+                    pass
+            if latest.get("model"):
+                data["model"] = latest["model"]
+        signature = tuple(sorted(data.items()))
+        if signature == self._last_usage_signature:
+            return
+        self._last_usage_signature = signature
+        await self._post_event(_EXTERNAL_SESSION_USAGE, data)
 
     async def _on_session_error(self, event: OpenCodeEvent) -> None:
         """Handle ``session.error`` — log, finalize, end turn."""

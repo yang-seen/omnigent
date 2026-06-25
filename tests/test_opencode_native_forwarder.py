@@ -458,3 +458,56 @@ async def test_session_compacted_posts_completed() -> None:
     await fwd.handle_event(_event("session.compacted"))
     body = next(b for _u, b in server.posts if b["type"] == "external_compaction_status")
     assert body["data"]["status"] == "completed"
+
+
+async def test_assistant_usage_posts_external_session_usage() -> None:
+    """message.updated assistant cost/tokens → external_session_usage (cumulative)."""
+    server, opencode = _RecordingServerClient(), _FakeOpenCodeClient()
+    fwd = _forwarder(server, opencode)
+    await fwd.handle_event(
+        _event(
+            "message.updated",
+            info={
+                "id": "msg_a",
+                "role": "assistant",
+                "modelID": "claude-sonnet-4-5",
+                "providerID": "anthropic",
+                "cost": 0.012,
+                "tokens": {"input": 1000, "output": 50, "cache": {"read": 200, "write": 0}},
+            },
+        )
+    )
+    usage = next(b for _u, b in server.posts if b["type"] == "external_session_usage")["data"]
+    assert usage["cumulative_cost_usd"] == 0.012
+    assert usage["cumulative_input_tokens"] == 1000
+    assert usage["cumulative_output_tokens"] == 50
+    assert usage["cumulative_cache_read_input_tokens"] == 200
+    assert usage["context_tokens"] == 1200  # input + cache.read + cache.write
+    assert usage["model"] == "anthropic/claude-sonnet-4-5"
+    assert usage["context_window"] > 0
+
+
+async def test_usage_sums_across_messages_and_dedupes() -> None:
+    server, opencode = _RecordingServerClient(), _FakeOpenCodeClient()
+    fwd = _forwarder(server, opencode)
+
+    def msg(mid: str, cost: float, inp: int) -> dict[str, object]:
+        return {
+            "id": mid,
+            "role": "assistant",
+            "modelID": "m",
+            "providerID": "p",
+            "cost": cost,
+            "tokens": {"input": inp, "output": 1},
+        }
+
+    await fwd.handle_event(_event("message.updated", info=msg("m1", 0.01, 100)))
+    await fwd.handle_event(_event("message.updated", info=msg("m2", 0.02, 200)))
+    usages = [b["data"] for _u, b in server.posts if b["type"] == "external_session_usage"]
+    assert usages[-1]["cumulative_cost_usd"] == 0.03  # 0.01 + 0.02
+    assert usages[-1]["cumulative_input_tokens"] == 300
+    # Re-posting the same final message must dedupe (no new identical post).
+    before = len(usages)
+    await fwd.handle_event(_event("message.updated", info=msg("m2", 0.02, 200)))
+    after = len([b for _u, b in server.posts if b["type"] == "external_session_usage"])
+    assert after == before
