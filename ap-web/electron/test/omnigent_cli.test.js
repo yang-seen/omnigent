@@ -1,0 +1,164 @@
+// Tests for the pure helpers in src/omnigent_cli.js, run with `node --test`
+// (no extra deps). The spawning functions need a real binary and are covered by
+// the manual verification flow; here we test path resolution order, server-URL
+// matching, and status parsing — the logic that decides "is this machine
+// connected to server X?" and "which omnigent binary do we run?".
+
+const { describe, it } = require("node:test");
+const assert = require("node:assert/strict");
+
+const {
+  normalizeServerUrl,
+  isLoopbackServer,
+  resolveCliPath,
+  parseJsonLoose,
+  matchesServer,
+  connectionFromStatus,
+} = require("../src/omnigent_cli");
+
+describe("normalizeServerUrl", () => {
+  it("strips trailing slashes and trims", () => {
+    assert.equal(normalizeServerUrl("https://x.com/"), "https://x.com");
+    assert.equal(normalizeServerUrl("  http://localhost:6767//  "), "http://localhost:6767");
+    assert.equal(normalizeServerUrl("https://x.com/ml/omnigents"), "https://x.com/ml/omnigents");
+  });
+
+  it("returns empty string for non-strings", () => {
+    assert.equal(normalizeServerUrl(undefined), "");
+    assert.equal(normalizeServerUrl(null), "");
+    assert.equal(normalizeServerUrl(42), "");
+  });
+});
+
+describe("isLoopbackServer", () => {
+  it("is true for loopback hosts", () => {
+    assert.equal(isLoopbackServer("http://localhost:6767"), true);
+    assert.equal(isLoopbackServer("http://127.0.0.1:6767"), true);
+    assert.equal(isLoopbackServer("http://[::1]:6767"), true);
+  });
+
+  it("is false for remote hosts and junk", () => {
+    assert.equal(isLoopbackServer("https://example.databricksapps.com"), false);
+    assert.equal(isLoopbackServer("not a url"), false);
+  });
+});
+
+describe("resolveCliPath", () => {
+  it("prefers a usable configured path", () => {
+    const got = resolveCliPath("/custom/omnigent", {
+      isExecutableFile: (p) => p === "/custom/omnigent",
+      whichOmnigent: () => "/usr/bin/omnigent",
+      candidatePaths: () => ["/home/me/.local/bin/omnigent"],
+    });
+    assert.deepEqual(got, { path: "/custom/omnigent", source: "configured" });
+  });
+
+  it("falls back to PATH when the configured path is unusable", () => {
+    const got = resolveCliPath("/bad/path", {
+      isExecutableFile: (p) => p === "/usr/bin/omnigent",
+      whichOmnigent: () => "/usr/bin/omnigent",
+      candidatePaths: () => ["/home/me/.local/bin/omnigent"],
+    });
+    assert.deepEqual(got, { path: "/usr/bin/omnigent", source: "path" });
+  });
+
+  it("falls back to a candidate when PATH misses (GUI minimal PATH)", () => {
+    const got = resolveCliPath(null, {
+      isExecutableFile: (p) => p === "/home/me/.local/bin/omnigent",
+      whichOmnigent: () => null,
+      candidatePaths: () => ["/home/me/.local/bin/omnigent", "/opt/homebrew/bin/omnigent"],
+    });
+    assert.deepEqual(got, { path: "/home/me/.local/bin/omnigent", source: "candidate" });
+  });
+
+  it("returns null when nothing is usable", () => {
+    const got = resolveCliPath(null, {
+      isExecutableFile: () => false,
+      whichOmnigent: () => null,
+      candidatePaths: () => ["/a", "/b"],
+    });
+    assert.equal(got, null);
+  });
+});
+
+describe("parseJsonLoose", () => {
+  it("parses clean JSON", () => {
+    assert.deepEqual(parseJsonLoose('{"running": true}'), { running: true });
+  });
+
+  it("recovers JSON after a stray warning line", () => {
+    assert.deepEqual(parseJsonLoose('WARN: something\n{"running": false}\n'), {
+      running: false,
+    });
+  });
+
+  it("returns null for empty or unparseable output", () => {
+    assert.equal(parseJsonLoose(""), null);
+    assert.equal(parseJsonLoose("not json"), null);
+  });
+});
+
+describe("matchesServer", () => {
+  it("matches on server_url or target, ignoring trailing slashes", () => {
+    assert.equal(
+      matchesServer({ server_url: "https://x.com/" }, "https://x.com"),
+      true,
+    );
+    assert.equal(matchesServer({ target: "https://x.com" }, "https://x.com/"), true);
+  });
+
+  it("does not match a different server", () => {
+    assert.equal(matchesServer({ server_url: "https://y.com" }, "https://x.com"), false);
+  });
+
+  it("is false for junk daemons or empty target", () => {
+    assert.equal(matchesServer(null, "https://x.com"), false);
+    assert.equal(matchesServer({ server_url: "https://x.com" }, ""), false);
+  });
+});
+
+describe("connectionFromStatus", () => {
+  const onlineDaemon = {
+    server_url: "https://x.com",
+    process: "online",
+    host_status: "online",
+    pid: 1234,
+    sessions: [{ id: "a" }, { id: "b" }],
+  };
+
+  it("reports connected when process and host_status are both online", () => {
+    const conn = connectionFromStatus({ daemons: [onlineDaemon] }, "https://x.com/");
+    assert.equal(conn.connected, true);
+    assert.equal(conn.process, "online");
+    assert.equal(conn.hostStatus, "online");
+    assert.equal(conn.sessions, 2);
+    assert.equal(conn.pid, 1234);
+  });
+
+  it("is not connected when the host tunnel is offline though the process lives", () => {
+    const conn = connectionFromStatus(
+      { daemons: [{ ...onlineDaemon, host_status: "offline" }] },
+      "https://x.com",
+    );
+    assert.equal(conn.connected, false);
+    assert.equal(conn.process, "online");
+    assert.equal(conn.hostStatus, "offline");
+  });
+
+  it("reports offline when no daemon matches the server", () => {
+    const conn = connectionFromStatus({ daemons: [onlineDaemon] }, "https://other.com");
+    assert.deepEqual(conn, {
+      connected: false,
+      process: "offline",
+      hostStatus: null,
+      sessions: 0,
+      pid: null,
+      error: null,
+    });
+  });
+
+  it("tolerates a missing/empty daemons array", () => {
+    assert.equal(connectionFromStatus(null, "https://x.com").connected, false);
+    assert.equal(connectionFromStatus({}, "https://x.com").connected, false);
+  });
+});
