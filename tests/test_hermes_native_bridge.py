@@ -92,14 +92,14 @@ def test_inject_user_message_dead_pane_raises(tmp_path, monkeypatch) -> None:
         b.inject_user_message(tmp_path, content="hi")
 
 
-def test_inject_interrupt_sends_escape(tmp_path, monkeypatch) -> None:
+def test_inject_interrupt_sends_ctrl_c(tmp_path, monkeypatch) -> None:
     calls: list[tuple[str, ...]] = []
     monkeypatch.setattr(
         b, "_wait_for_tmux_info", lambda *_a, **_k: {"socket_path": "/s", "tmux_target": "t"}
     )
     monkeypatch.setattr(b, "_run_tmux", lambda _sock, *args: calls.append(args))
     b.inject_interrupt(tmp_path)
-    assert calls == [("send-keys", "-t", "t", "Escape")]
+    assert calls == [("send-keys", "-t", "t", "C-c")]
 
 
 def test_kill_session_kills_target(tmp_path, monkeypatch) -> None:
