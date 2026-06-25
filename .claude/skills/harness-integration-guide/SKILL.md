@@ -113,7 +113,6 @@ All capabilities are **required** for a complete harness integration:
 - [ ] Images are forwarded (full binary preferred; path or text-flattened acceptable)
 - [ ] Cost tracking reports token usage and cost per turn
 - [ ] Unit tests cover tool bridging, auth, model routing
-- [ ] E2E skill exists for manual smoke-testing against a live server
 - [ ] Mock LLM tests cover the happy path without real API calls
 
 ---
@@ -163,5 +162,4 @@ All capabilities are **required** for a complete native harness integration:
 - [ ] Images are forwarded (path preferred; binary or text-flattened acceptable)
 - [ ] Cost tracking reports token usage and cost per turn
 - [ ] Unit tests cover forwarder, auth, transport
-- [ ] E2E skill exists for manual smoke-testing against a live server
 - [ ] Mock LLM tests cover the happy path without real API calls
