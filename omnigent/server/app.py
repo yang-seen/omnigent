@@ -1632,12 +1632,18 @@ def create_app(
         # actually offered; None when no provider is named (embedding
         # configs may leave it unset) so the UI keeps the generic label.
         sandbox_provider = sandbox_config.provider if managed_sandboxes_enabled else None
-        # smart_routing_enabled: the server has a RoutingClient configured
-        # (OMNIGENT_SMART_ROUTING=1 + llm: config). Hidden by default.
+        # smart_routing_enabled: true when the server can route — either
+        # a RoutingClient is explicitly configured (OMNIGENT_SMART_ROUTING=1
+        # + llm: config) or the managed deployment registered a
+        # policy_llm_connection_factory (which means it has LLM capability
+        # and will supply its own RoutingClient).
         try:
             from omnigent.runtime._globals import _caps
 
-            smart_routing_enabled = _caps is not None and _caps.routing_client is not None
+            smart_routing_enabled = _caps is not None and (
+                _caps.routing_client is not None
+                or _caps.policy_llm_connection_factory is not None
+            )
         except ImportError:
             smart_routing_enabled = False
         return {
