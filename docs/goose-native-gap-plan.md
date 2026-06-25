@@ -160,10 +160,14 @@ Key properties:
   `PHASE_TOOL_RESULT` ASK/DENY cannot *block* a result goose has already
   returned to the model. We can post-hoc evaluate the `toolResponse` row for
   **audit/observability**, but not enforcement. The headless harness enforces
-  both checkpoints. This is a goose limitation (no post-tool hook), documented,
-  not engineered around. **Decision: in scope, scheduled last** — implement the
-  post-hoc `toolResponse` audit evaluation (`PHASE_TOOL_RESULT`,
-  non-blocking/observability-only) after all enforcement + gap-fills are working.
+  both checkpoints. This is a goose limitation (no post-tool hook). **Done
+  (observability only):** `goose_native_audit.py` polls completed `toolResponse`
+  rows, correlates each to its `toolRequest` (name + args), and POSTs
+  `PHASE_TOOL_RESULT` to `/policies/evaluate`. That endpoint parks an approval
+  gate only for TOOL_CALL/LLM_REQUEST/REQUEST — NOT TOOL_RESULT — so the eval is
+  side-effect-free (no spurious prompt for a result that already ran). The
+  evaluation is recorded server-side; a non-allow verdict logs a runner warning.
+  It cannot *block* (goose already returned the result to the model).
 - **Latency / chattiness.** `approve` mode prompts on every tool; each adds a
   policy round-trip + a cliclack drive. **Decision (v1):** `GOOSE_MODE=approve`
   is set **unconditionally** — NOT gated on whether policies exist. Gating it
