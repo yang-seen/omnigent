@@ -5933,13 +5933,15 @@ async def test_forward_session_cost_tags_display_advance_with_model(
 
 
 @pytest.mark.asyncio
-async def test_persist_native_compaction_item_posts_compaction_event() -> None:
+async def test_persist_native_compaction_item_posts_compaction_event(tmp_path: Path) -> None:
     """
     ``_persist_native_compaction_item`` queries the latest item and posts a compaction event.
 
     The function GETs ``/v1/sessions/{id}/items?limit=1&order=desc`` to
-    find the most recent persisted item, then POSTs a ``compaction``
-    event using that item's id as ``last_item_id``.
+    find the most recent persisted item, reads post-compaction messages
+    from the Claude session, then POSTs a ``compaction`` event using
+    that item's id as ``last_item_id`` and the messages as
+    ``compacted_messages``.
     """
     get_response = MagicMock()
     get_response.raise_for_status = MagicMock()
@@ -5952,7 +5954,26 @@ async def test_persist_native_compaction_item_posts_compaction_event() -> None:
     client.get.return_value = get_response
     client.post.return_value = post_response
 
-    await _persist_native_compaction_item(client, session_id="conv_test")
+    # Build a fake message returned by get_session_messages.
+    fake_msg = MagicMock()
+    fake_msg.type = "assistant"
+    fake_msg.message = {"content": [{"type": "text", "text": "hello"}]}
+
+    bridge_dir = tmp_path / "bridge"
+
+    with (
+        patch(
+            "omnigent.claude_native_forwarder.read_claude_session_id",
+            return_value="claude-uuid-1",
+        ),
+        patch(
+            "claude_agent_sdk.get_session_messages",
+            return_value=[fake_msg],
+        ),
+    ):
+        await _persist_native_compaction_item(
+            client, session_id="conv_test", bridge_dir=bridge_dir
+        )
 
     client.get.assert_called_once_with(
         "/v1/sessions/conv_test/items",
@@ -5967,10 +5988,14 @@ async def test_persist_native_compaction_item_posts_compaction_event() -> None:
     assert body["data"]["summary"] is not None
     assert body["data"]["model"] == "unknown"
     assert body["data"]["token_count"] == 0
+    # compacted_messages should contain the converted fake message.
+    assert body["data"]["compacted_messages"] == [
+        {"type": "message", "role": "assistant", "content": [{"type": "text", "text": "hello"}]},
+    ]
 
 
 @pytest.mark.asyncio
-async def test_persist_native_compaction_item_empty_items_uses_fallback() -> None:
+async def test_persist_native_compaction_item_empty_items_uses_fallback(tmp_path: Path) -> None:
     """
     When no items exist, ``last_item_id`` falls back to a generated boundary id.
 
@@ -5990,11 +6015,23 @@ async def test_persist_native_compaction_item_empty_items_uses_fallback() -> Non
     client.get.return_value = get_response
     client.post.return_value = post_response
 
-    await _persist_native_compaction_item(client, session_id="conv_empty")
+    bridge_dir = tmp_path / "bridge"
+
+    with (
+        patch(
+            "omnigent.claude_native_forwarder.read_claude_session_id",
+            return_value=None,
+        ),
+    ):
+        await _persist_native_compaction_item(
+            client, session_id="conv_empty", bridge_dir=bridge_dir
+        )
 
     post_call = client.post.call_args
     body = post_call[1]["json"] if "json" in post_call[1] else post_call[0][1]
     assert body["data"]["last_item_id"].startswith("compact_boundary_")
+    # No compacted_messages when claude_sid is None.
+    assert "compacted_messages" not in body["data"]
 
 
 @pytest.mark.asyncio
