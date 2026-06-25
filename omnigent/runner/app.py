@@ -1969,6 +1969,24 @@ async def _auto_create_goose_terminal(
     bridge_dir = bridge_dir_for_session_id(session_id)
     clear_goose_bridge_state(bridge_dir)
 
+    # Wire the Omnigent MCP server so goose gets the sys_*/comment/web tools the
+    # other native harnesses expose. goose loads it as a stdio extension; we point
+    # ``--with-extension`` at a launcher named ``omnigent_mcp`` (goose names a
+    # stdio extension after the command basename) that execs the SAME shared
+    # ``serve-mcp`` stdio server claude/codex/cursor use. ``bridge.json`` (token)
+    # lets serve-mcp boot; the runner-side relay (``ensure_comment_relay`` below)
+    # writes ``tool_relay.json``. Calls flow through the §3 policy gate like any
+    # tool. Offloaded to threads (file I/O) and done BEFORE launch so goose sees
+    # the launcher on startup.
+    from omnigent.codex_native_bridge import write_mcp_bridge_config
+    from omnigent.goose_native_bridge import (
+        goose_mcp_extension_value,
+        write_goose_mcp_launcher,
+    )
+
+    await asyncio.to_thread(write_mcp_bridge_config, bridge_dir)
+    await asyncio.to_thread(write_goose_mcp_launcher, bridge_dir)
+
     # ``_pi_native_launch_config`` is a generic session-snapshot reader
     # (workspace + terminal_launch_args); reused here, not Pi-specific.
     launch_config = await _pi_native_launch_config(
@@ -2001,6 +2019,10 @@ async def _auto_create_goose_terminal(
         "session",
         "--name",
         goose_session_name,
+        # Omnigent MCP server (stdio launcher named ``omnigent_mcp``). User
+        # passthrough args stay last so an explicit user extension/flag wins.
+        "--with-extension",
+        goose_mcp_extension_value(bridge_dir),
         *(launch_config.terminal_launch_args or []),
     ]
     terminal_view = await resource_registry.launch_required_terminal(

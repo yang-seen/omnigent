@@ -8,9 +8,12 @@ analog of the cursor-native tmux bridge. This is what wires the web-UI chat box
 to the running Goose TUI (and, since the web UI embeds that pane, the message
 shows in both surfaces).
 
-Unlike cursor-native, this bridge does NOT write any vendor MCP config: Goose's
-MCP "extensions" live in ``~/.config/goose/config.yaml`` (owned by the user via
-``goose configure``), and Omnigent does not mutate user config in v1.
+This bridge does NOT mutate the user's ``~/.config/goose/config.yaml`` (their own
+``goose configure`` extensions stay theirs). It DOES connect the Omnigent MCP
+server at launch via a per-session stdio launcher (:func:`write_goose_mcp_launcher`)
+that goose loads with ``--with-extension`` — the same shared ``serve-mcp`` the
+other native harnesses use — so goose gets the Omnigent ``sys_*`` / comment / web
+tools without touching user config.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -29,6 +33,14 @@ from omnigent._platform import stable_user_id
 
 #: Env var carrying the bridge dir into the harness executor process.
 BRIDGE_DIR_ENV_VAR = "HARNESS_GOOSE_NATIVE_BRIDGE_DIR"
+
+#: The extension name Omnigent's MCP server is exposed under inside goose. goose
+#: derives a stdio extension's name from the launch command's *basename* (see
+#: goose-cli ``parse_stdio_extension``) and offers no flag to set it, so the
+#: launcher below MUST be named exactly this. Tools then surface to the model as
+#: ``omnigent_mcp__<tool>`` and the store records ``_meta.goose_extension`` ==
+#: this value (the hook the policy mirror can key an Omnigent-MCP skip on).
+MCP_EXTENSION_NAME = "omnigent_mcp"
 
 _BRIDGE_ROOT = Path(tempfile.gettempdir()) / f"omnigent-{stable_user_id()}" / "goose-native"
 _TMUX_FILE = "tmux.json"
@@ -57,6 +69,40 @@ def bridge_dir_for_session_id(session_id: str) -> Path:
 def bridge_root() -> Path:
     """Return the configured goose-native bridge root."""
     return _BRIDGE_ROOT
+
+
+def write_goose_mcp_launcher(bridge_dir: Path, *, python_executable: str | None = None) -> Path:
+    """Write the executable launcher goose's ``--with-extension`` points at.
+
+    goose names a stdio extension after its command's basename and has no flag to
+    override it, so to get a clean, collision-free name (tools surface as
+    ``omnigent_mcp__<tool>`` rather than ``python__<tool>``) we point goose at a
+    tiny launcher literally named :data:`MCP_EXTENSION_NAME`. It execs the same
+    shared ``serve-mcp`` stdio MCP server the other native harnesses use, which
+    reads ``bridge.json`` (token) + ``tool_relay.json`` from *bridge_dir*.
+
+    :param bridge_dir: The goose-native bridge dir (also holds ``bridge.json``).
+    :param python_executable: Python to exec; defaults to :data:`sys.executable`.
+    :returns: The launcher path to pass as the ``--with-extension`` value.
+    """
+    _ensure_dir(bridge_dir)
+    python = python_executable or sys.executable
+    launcher = bridge_dir / MCP_EXTENSION_NAME
+    script = (
+        "#!/bin/sh\n"
+        f'exec "{python}" -m omnigent.claude_native_bridge serve-mcp '
+        f'--bridge-dir "{bridge_dir}"\n'
+    )
+    tmp = bridge_dir / (MCP_EXTENSION_NAME + ".tmp")
+    tmp.write_text(script, encoding="utf-8")
+    tmp.chmod(0o755)
+    os.replace(tmp, launcher)
+    return launcher
+
+
+def goose_mcp_extension_value(bridge_dir: Path) -> str:
+    """Return the ``--with-extension`` value (the launcher path) for *bridge_dir*."""
+    return str(bridge_dir / MCP_EXTENSION_NAME)
 
 
 def _ensure_dir(path: Path) -> None:
