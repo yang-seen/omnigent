@@ -205,9 +205,17 @@ function interruptActiveContext(ctx) {
  * "Compacting conversation…" spinner tracks Pi's real progress: in_progress on
  * submit, then completed/failed from Pi's onComplete/onError callbacks.
  *
- * Returns true once compaction was submitted (a completed/failed edge will
- * follow), or false when no compactable context is available — the caller
- * publishes the failed edge so the spinner is never stranded.
+ * Returns true once compaction was submitted: in_progress has been posted and a
+ * completed/failed edge will follow from Pi's callbacks. Returns false in two
+ * cases, neither of which strands the spinner:
+ *   - No resident context (ctx missing or ctx.compact not a function): we return
+ *     early WITHOUT posting in_progress, so no spinner is ever raised (the web
+ *     spinner is created only by the response.compaction.in_progress SSE).
+ *   - ctx.compact() threw synchronously: we posted in_progress, so the catch
+ *     posts failed here to dismiss the spinner before returning.
+ * The caller (the inbox poller) discards this boolean — spinner bracketing is
+ * entirely self-contained here, so it must never depend on the caller cleaning
+ * up. Keep it that way if an optimistic on-click spinner is ever added upstream.
  */
 function triggerCompaction(config, ctx, customInstructions) {
   if (!ctx || typeof ctx.compact !== "function") return false;
@@ -353,10 +361,13 @@ function startInboxPoller(pi, config, handleInterrupt, handleCompact) {
       if (payload.type === "compact") {
         // A compact request is point-in-time like an interrupt: make one
         // delivery attempt against the resident context, then always consume
-        // the file (below). handleCompact publishes the in_progress /
-        // completed / failed compaction edges itself (so the web UI spinner is
-        // never stranded), so there is nothing to retry — leaving the file
-        // would re-trigger compaction every tick.
+        // the file (below). handleCompact owns all compaction-edge publishing
+        // (triggerCompaction posts in_progress only after it has a context to
+        // compact, then completed/failed from Pi's callbacks), so the web UI
+        // spinner is never stranded and there is nothing to retry — leaving the
+        // file would re-trigger compaction every tick. The return value is
+        // intentionally discarded: a missing resident context posts no edge and
+        // raises no spinner, so there is nothing for the poller to clean up.
         if (typeof handleCompact === "function") {
           handleCompact(
             typeof payload.custom_instructions === "string"

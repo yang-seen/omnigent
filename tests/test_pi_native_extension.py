@@ -296,6 +296,245 @@ const ctx = {
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_compact_payload_without_ctx_compact_posts_no_status_and_consumes_file(
+    tmp_path: Path,
+) -> None:
+    """A ``compact`` payload with no compactable context strands nothing.
+
+    Runs the real JavaScript extension under Node with a resident context that
+    exposes no ``compact`` function (e.g. an older Pi without the extension
+    compaction API). ``triggerCompaction`` returns early WITHOUT posting an
+    ``in_progress`` edge, so the web UI spinner — created only by the
+    ``response.compaction.in_progress`` SSE — is never raised and cannot strand.
+    This pins the safety property the review relies on: zero
+    ``external_compaction_status`` events, no throw, and the payload file is still
+    consumed (unlinked) so the poller does not re-read it forever.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the pi-native extension e2e test")
+
+    extension_path = (
+        Path(__file__).resolve().parents[1]
+        / "omnigent"
+        / "resources"
+        / "pi_native"
+        / "omnigent_pi_native_extension.js"
+    )
+
+    script = r"""
+const assert = require("assert").strict;
+const fs = require("fs");
+const path = require("path");
+
+const extensionPath = process.argv[1];
+const tmpDir = process.argv[2];
+const inboxDir = path.join(tmpDir, "inbox");
+const payloadPath = path.join(inboxDir, "000-compact.json");
+const configPath = path.join(tmpDir, "config.json");
+
+fs.mkdirSync(inboxDir, { recursive: true });
+fs.writeFileSync(
+  payloadPath,
+  JSON.stringify({ id: "compact-1", type: "compact" }),
+);
+fs.writeFileSync(
+  configPath,
+  JSON.stringify({
+    serverUrl: "http://omnigent.test",
+    sessionId: "session-1",
+    inboxDir,
+  }),
+);
+
+process.env.OMNIGENT_PI_NATIVE_CONFIG = configPath;
+
+const postedEvents = [];
+global.fetch = async (_url, request) => {
+  postedEvents.push(JSON.parse(request.body));
+  return { ok: true };
+};
+
+let pollInbox = null;
+global.setInterval = (fn, _ms) => {
+  pollInbox = fn;
+  return { fakeInterval: true };
+};
+
+const handlers = {};
+const pi = {
+  registerCommand() {},
+  on(eventName, handler) {
+    handlers[eventName] = handler;
+  },
+  sendUserMessage() {},
+};
+
+require(extensionPath)(pi);
+
+// Resident context WITHOUT a compact() function: triggerCompaction must
+// short-circuit and post nothing.
+const ctx = {
+  sessionManager: { getSessionId: () => "native-session-1" },
+  ui: { setTitle() {}, setStatus() {}, notify() {} },
+  abort() {},
+  isIdle: () => false,
+};
+
+(async () => {
+  await handlers.session_start({}, ctx);
+  assert.equal(typeof pollInbox, "function");
+
+  // Must not throw even though ctx.compact is absent.
+  pollInbox();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const compactionStatuses = postedEvents.filter(
+    (event) => event.type === "external_compaction_status",
+  );
+  // No spinner is ever raised: zero compaction-status edges (most importantly
+  // no in_progress), so nothing can strand.
+  assert.deepEqual(compactionStatuses, [], JSON.stringify(postedEvents));
+
+  // The payload file is still consumed so the poller does not re-read it.
+  assert.equal(fs.existsSync(payloadPath), false);
+})().catch((error) => {
+  console.error(error && error.stack ? error.stack : error);
+  process.exit(1);
+});
+"""
+
+    result = subprocess.run(
+        [node, "-e", script, str(extension_path), str(tmp_path)],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_compact_payload_synchronous_throw_dismisses_spinner(
+    tmp_path: Path,
+) -> None:
+    """A synchronous throw from ``ctx.compact()`` still dismisses the spinner.
+
+    ``triggerCompaction`` posts ``in_progress`` BEFORE calling the fire-and-forget
+    ``ctx.compact()``. If that call throws synchronously (before any
+    ``onComplete``/``onError`` can fire), the catch must post ``failed`` so the
+    raised spinner is dismissed rather than stranded. Edges must be exactly
+    ``[in_progress, failed]`` — distinct from the ``onError`` path, which reaches
+    ``failed`` via the callback.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the pi-native extension e2e test")
+
+    extension_path = (
+        Path(__file__).resolve().parents[1]
+        / "omnigent"
+        / "resources"
+        / "pi_native"
+        / "omnigent_pi_native_extension.js"
+    )
+
+    script = r"""
+const assert = require("assert").strict;
+const fs = require("fs");
+const path = require("path");
+
+const extensionPath = process.argv[1];
+const tmpDir = process.argv[2];
+const inboxDir = path.join(tmpDir, "inbox");
+const payloadPath = path.join(inboxDir, "000-compact.json");
+const configPath = path.join(tmpDir, "config.json");
+
+fs.mkdirSync(inboxDir, { recursive: true });
+fs.writeFileSync(
+  payloadPath,
+  JSON.stringify({ id: "compact-1", type: "compact" }),
+);
+fs.writeFileSync(
+  configPath,
+  JSON.stringify({
+    serverUrl: "http://omnigent.test",
+    sessionId: "session-1",
+    inboxDir,
+  }),
+);
+
+process.env.OMNIGENT_PI_NATIVE_CONFIG = configPath;
+
+const postedEvents = [];
+global.fetch = async (_url, request) => {
+  postedEvents.push(JSON.parse(request.body));
+  return { ok: true };
+};
+
+let pollInbox = null;
+global.setInterval = (fn, _ms) => {
+  pollInbox = fn;
+  return { fakeInterval: true };
+};
+
+const handlers = {};
+const pi = {
+  registerCommand() {},
+  on(eventName, handler) {
+    handlers[eventName] = handler;
+  },
+  sendUserMessage() {},
+};
+
+require(extensionPath)(pi);
+
+const ctx = {
+  sessionManager: { getSessionId: () => "native-session-1" },
+  ui: { setTitle() {}, setStatus() {}, notify() {} },
+  abort() {},
+  isIdle: () => false,
+  compact() {
+    throw new Error("compact() exploded synchronously");
+  },
+};
+
+(async () => {
+  await handlers.session_start({}, ctx);
+  // Must not throw out of the poller even though compact() throws.
+  pollInbox();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const compactionStatuses = postedEvents
+    .filter((event) => event.type === "external_compaction_status")
+    .map((event) => event.data && event.data.status);
+  // in_progress was posted before compact(); the synchronous throw is caught
+  // and posts failed to dismiss the spinner.
+  assert.deepEqual(
+    compactionStatuses,
+    ["in_progress", "failed"],
+    JSON.stringify(postedEvents),
+  );
+
+  // The payload file is consumed so compaction is not re-triggered each tick.
+  assert.equal(fs.existsSync(payloadPath), false);
+})().catch((error) => {
+  console.error(error && error.stack ? error.stack : error);
+  process.exit(1);
+});
+"""
+
+    result = subprocess.run(
+        [node, "-e", script, str(extension_path), str(tmp_path)],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_compact_payload_failure_dismisses_spinner(tmp_path: Path) -> None:
     """When ``ctx.compact()`` reports an error, the extension posts ``failed``.
 
