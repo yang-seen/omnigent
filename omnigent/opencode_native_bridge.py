@@ -57,6 +57,10 @@ _XDG_CONFIG_DIR = "xdg-config"
 # Omnigent builtin tools (``sys_*``/``load_skill``/``web_fetch``) advertised in
 # ``tool_relay.json`` by the runner's comment relay.
 _MCP_BRIDGE_CONFIG_FILE = "bridge.json"
+# AP-routing snapshot the detached cost-approval popup process reads to resolve
+# the elicitation against the Omnigent server (mirrors codex-native's
+# ``policy_hook.json``; consumed by ``omnigent.native_cost_popup``).
+_COST_POPUP_CONFIG_FILE = "cost_popup.json"
 _STATE_VERSION = 1
 _BRIDGE_ROOT = Path.home() / ".omnigent" / "opencode-native"
 _ID_HASH_CHARS = 32
@@ -210,6 +214,40 @@ def write_relay_bridge_config(bridge_dir: Path) -> None:
     finally:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)
+
+
+def write_cost_popup_config(
+    bridge_dir: Path, *, ap_server_url: str, ap_auth_headers: dict[str, str]
+) -> Path:
+    """
+    Write the AP-routing snapshot the cost-approval popup reads.
+
+    The cost-budget approval modal runs as a detached
+    ``omnigent.native_cost_popup`` subprocess inside a ``tmux display-popup`` on
+    the opencode pane; it must POST the verdict to the Omnigent server but cannot
+    inherit the forwarder's in-memory client, so the base URL + a one-shot auth
+    header snapshot are persisted here (same contract as codex-native's
+    ``policy_hook.json``). Rewritten on each checkpoint so the token is fresh.
+
+    :param bridge_dir: OpenCode-native bridge directory.
+    :param ap_server_url: Omnigent server base URL, e.g. ``"http://127.0.0.1:6767"``.
+    :param ap_auth_headers: Outbound auth headers, e.g.
+        ``{"Authorization": "Bearer <token>"}``; empty for no-auth local mode.
+    :returns: The written config file path (passed to ``launch_cost_popup``).
+    """
+    bridge_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = bridge_dir / _COST_POPUP_CONFIG_FILE
+    payload = {"ap_server_url": ap_server_url, "ap_auth_headers": ap_auth_headers}
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{_COST_POPUP_CONFIG_FILE}.", dir=str(bridge_dir))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+    return path
 
 
 def xdg_data_home_for_bridge_dir(bridge_dir: Path) -> Path:

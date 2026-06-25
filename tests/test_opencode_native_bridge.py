@@ -22,6 +22,7 @@ from omnigent.opencode_native_bridge import (
     update_last_event_id,
     update_model_override,
     write_bridge_state,
+    write_cost_popup_config,
     write_relay_bridge_config,
     xdg_config_home_for_bridge_dir,
     xdg_data_home_for_bridge_dir,
@@ -133,6 +134,22 @@ def test_write_relay_bridge_config_writes_token_and_is_idempotent(bridge_dir: Pa
     # may already have been started with it).
     write_relay_bridge_config(bridge_dir)
     assert json.loads(config_path.read_text())["token"] == token
+
+
+def test_write_cost_popup_config_writes_ap_routing(bridge_dir: Path) -> None:
+    path = write_cost_popup_config(
+        bridge_dir,
+        ap_server_url="http://127.0.0.1:6767",
+        ap_auth_headers={"Authorization": "Bearer tok"},
+    )
+    payload = json.loads(path.read_text())
+    assert payload == {
+        "ap_server_url": "http://127.0.0.1:6767",
+        "ap_auth_headers": {"Authorization": "Bearer tok"},
+    }
+    # Rewritten (not skipped) so a later checkpoint gets a fresh token.
+    write_cost_popup_config(bridge_dir, ap_server_url="http://h:1", ap_auth_headers={})
+    assert json.loads(path.read_text()) == {"ap_server_url": "http://h:1", "ap_auth_headers": {}}
 
 
 def test_update_last_event_id(bridge_dir: Path) -> None:

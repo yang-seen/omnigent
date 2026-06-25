@@ -11547,16 +11547,78 @@ def create_runner_app(
             )
         return Response(status_code=204)
 
+    async def _handle_opencode_native_cost_popup(
+        conv_id: str,
+        elicitation_id: str,
+        message: str,
+        policy_name: str | None = None,
+    ) -> Response:
+        """
+        Overlay a cost-budget approval modal on opencode's tmux pane.
+
+        Without this, a cost-budget ASK only surfaced as the web ApprovalCard,
+        so a user working in the ``opencode attach`` TUI could keep sending
+        turns past the budget — the web was gated but the TUI was not. This
+        pops the SAME elicitation as a ``tmux display-popup`` on the opencode
+        pane (the claude/codex behaviour), so the budget blocks the TUI too.
+        The pane socket/target come from the resource registry (opencode's
+        terminal is registry-launched like cursor's); AP routing is written
+        fresh by :func:`_native_cost_popup_config_file`. The launch itself is
+        the shared, harness-agnostic :func:`launch_cost_popup`.
+
+        Best-effort: 204 when no live opencode terminal is registered (the web
+        card stays the only surface).
+
+        :param conv_id: Session/conversation identifier, e.g. ``"conv_abc123"``.
+        :param elicitation_id: Outstanding elicitation correlation id.
+        :param message: Approval reason to display.
+        :param policy_name: Deciding policy name (modal header); ``None`` →
+            generic header.
+        :returns: 204 once dispatched (or skipped); 503 if launching raised.
+        """
+        from omnigent.native_cost_popup import launch_cost_popup
+
+        registry = resource_registry.terminal_registry
+        instance = registry.get(conv_id, "opencode", "main") if registry is not None else None
+        if instance is None or not instance.running:
+            # No live opencode terminal to render on; web card is the surface.
+            return Response(status_code=204)
+        config_file = await _native_cost_popup_config_file(conv_id, "opencode-native")
+        try:
+            await asyncio.to_thread(
+                launch_cost_popup,
+                str(instance.socket_path),
+                instance.tmux_target,
+                config_file,
+                session_id=conv_id,
+                elicitation_id=elicitation_id,
+                message=message,
+                policy_name=policy_name,
+            )
+        except (RuntimeError, ValueError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": "opencode_native_cost_popup_failed",
+                    "detail": _client_safe_error_detail(exc, context="opencode-native cost popup"),
+                },
+            )
+        return Response(status_code=204)
+
     async def _native_cost_popup_config_file(conv_id: str, harness: str) -> Path:
         """
         Resolve the AP-routing config file the cost popup reads, per harness.
 
         The popup script reads ``ap_server_url`` + ``ap_auth_headers`` from
         this file: ``permission_hook.json`` in the claude-native bridge dir,
-        ``policy_hook.json`` in the codex-native bridge dir.
+        ``policy_hook.json`` in the codex-native bridge dir. opencode-native
+        has no permission/policy hook of its own (it gates via the SSE
+        forwarder), so there is no such file at rest — write a fresh snapshot
+        here (the only consumer is this popup).
 
         :param conv_id: Session/conversation id, e.g. ``"conv_abc123"``.
-        :param harness: ``"claude-native"`` or ``"codex-native"``.
+        :param harness: ``"claude-native"``, ``"codex-native"``, or
+            ``"opencode-native"``.
         :returns: Path to the harness's AP-routing config file.
         """
         if harness == "claude-native":
@@ -11566,6 +11628,23 @@ def create_runner_app(
                 server_client=server_client, session_id=conv_id
             )
             return _cnb.bridge_dir_for_bridge_id(bridge_id) / _cnb._PERMISSION_HOOK_FILE
+        if harness == "opencode-native":
+            from omnigent.opencode_native_bridge import (
+                bridge_dir_for_bridge_id as _oc_bridge_dir,
+            )
+            from omnigent.opencode_native_bridge import (
+                write_cost_popup_config,
+            )
+            from omnigent.runner._entry import _make_auth_token_factory
+
+            _factory = _make_auth_token_factory()
+            _token = _factory() if _factory is not None else None
+            return await asyncio.to_thread(
+                write_cost_popup_config,
+                _oc_bridge_dir(conv_id),
+                ap_server_url=_required_runner_env("RUNNER_SERVER_URL"),
+                ap_auth_headers={"Authorization": f"Bearer {_token}"} if _token else {},
+            )
         from omnigent import codex_native_bridge as _cxb
 
         return _cxb.bridge_dir_for_bridge_id(conv_id) / _cxb._POLICY_HOOK_FILE
@@ -11596,7 +11675,7 @@ def create_runner_app(
         :returns: None.
         """
         harness = _session_harness_name(conv_id)
-        if harness not in ("claude-native", "codex-native"):
+        if harness not in ("claude-native", "codex-native", "opencode-native"):
             return
         from omnigent.native_cost_popup import launch_cost_popup, wait_for_tmux_client
 
@@ -14352,8 +14431,8 @@ def create_runner_app(
             # be answered from the native terminal (a tmux display-popup),
             # not only the web ApprovalCard. The popup resolves the SAME
             # elicitation via the resolve endpoint the web card uses, so
-            # whichever surface answers first wins. claude-native and
-            # codex-native each pop the modal on their pane (different
+            # whichever surface answers first wins. claude-native, codex-native,
+            # and opencode-native each pop the modal on their pane (different
             # tmux/AP-config sources, shared launcher); other harnesses
             # 204 no-op (the web card is their only surface).
             elicitation_id = body.get("elicitation_id") if isinstance(body, dict) else None
@@ -14387,6 +14466,10 @@ def create_runner_app(
                 )
             if harness == "codex-native":
                 return await _handle_codex_native_cost_popup(
+                    conversation_id, elicitation_id, popup_message, popup_policy_name
+                )
+            if harness == "opencode-native":
+                return await _handle_opencode_native_cost_popup(
                     conversation_id, elicitation_id, popup_message, popup_policy_name
                 )
             return Response(status_code=204)
