@@ -52,10 +52,10 @@ from omnigent.onboarding.provider_config import (
     FamilyConfig,
     ProviderEntry,
     default_provider_for_harness,
+    first_available_provider,
     harness_family,
     load_config,
     load_providers,
-    provider_families,
 )
 from omnigent.onboarding.ucode_state import UcodeAgentState, read_ucode_state
 from omnigent.runtime import (
@@ -984,9 +984,7 @@ def _resolve_provider_for_build(
     if allow_first_available_fallback:
         family = harness_family(harness)
         if family is not None:
-            for entry in load_providers(effective).values():
-                if family in provider_families(entry):
-                    return entry
+            return first_available_provider(effective, family)
     return None
 
 
