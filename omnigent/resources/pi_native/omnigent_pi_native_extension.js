@@ -75,6 +75,23 @@ function piResultFromMcpResponse(json) {
     return { content: [{ type: "text", text: String(msg) }], isError: true };
   }
   const result = json && typeof json === "object" ? json.result : undefined;
+  // An ``input_required`` envelope must never reach this mapper: it carries no
+  // ``content`` array, so it would otherwise fall to the "unexpected shape"
+  // branch and be returned as ``isError: false`` — a confusing elicitation blob
+  // masquerading as a successful tool result. callOmnigentTool detects and
+  // resolves the ASK round-trip BEFORE calling this; treat a stray one as a
+  // fail-closed error so an unresolved approval never reports success.
+  if (result && typeof result === "object" && result.resultType === "input_required") {
+    return {
+      content: [
+        {
+          type: "text",
+          text: "Omnigent tool call requires approval that was not resolved",
+        },
+      ],
+      isError: true,
+    };
+  }
   if (result && Array.isArray(result.content)) {
     const parts = [];
     for (const block of result.content) {
@@ -96,6 +113,88 @@ function piResultFromMcpResponse(json) {
 }
 
 /**
+ * Extract the elicitation id + opaque requestState from an MCP
+ * ``input_required`` (MRTR) envelope, or ``null`` when the response is not an
+ * ``input_required`` result.
+ *
+ * The Omnigent server keys ``inputRequests`` by the server-minted elicitation
+ * id (the MRTR spec lets the client read those keys; only ``requestState`` is
+ * opaque), so the first key is the id the retry must echo back inside
+ * ``inputResponses``.
+ */
+function mcpInputRequired(json) {
+  const result = json && typeof json === "object" ? json.result : undefined;
+  if (!result || typeof result !== "object" || result.resultType !== "input_required") {
+    return null;
+  }
+  const inputRequests =
+    result.inputRequests && typeof result.inputRequests === "object"
+      ? result.inputRequests
+      : {};
+  const elicitationId = Object.keys(inputRequests)[0] || "";
+  const requestState =
+    typeof result.requestState === "string" ? result.requestState : "";
+  return { elicitationId, requestState };
+}
+
+/**
+ * POST a single JSON-RPC ``tools/call`` to the server's per-session MCP proxy
+ * and return the parsed response (or a fail-closed Pi tool-result on a
+ * transport/HTTP error). ``extraParams`` carries the MRTR retry fields
+ * (``requestState`` + ``inputResponses``) on the approval retry; it is omitted
+ * on the initial call.
+ *
+ * @returns {Promise<{json: object} | {piResult: object}>} ``json`` on a parsed
+ *   200 response; ``piResult`` is a terminal fail-closed tool result the caller
+ *   returns as-is.
+ */
+async function postMcpToolsCall(config, toolName, args, rpcId, extraParams) {
+  const url = `${config.serverUrl}/v1/sessions/${encodeURIComponent(config.sessionId)}/mcp`;
+  const body = JSON.stringify({
+    jsonrpc: "2.0",
+    id: rpcId,
+    method: "tools/call",
+    params: { name: toolName, arguments: args || {}, ...(extraParams || {}) },
+  });
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...(config.authHeaders || {}),
+      },
+      body,
+    });
+    if (!resp.ok) {
+      return {
+        piResult: {
+          content: [
+            {
+              type: "text",
+              text: `Omnigent tool call failed: HTTP ${resp.status}`,
+            },
+          ],
+          isError: true,
+        },
+      };
+    }
+    return { json: await resp.json() };
+  } catch (err) {
+    return {
+      piResult: {
+        content: [
+          {
+            type: "text",
+            text: `Omnigent tool call failed: ${err && err.message ? err.message : String(err)}`,
+          },
+        ],
+        isError: true,
+      },
+    };
+  }
+}
+
+/**
  * Execute an Omnigent tool by POSTing a JSON-RPC ``tools/call`` request to the
  * server's per-session MCP proxy endpoint
  * (``POST /v1/sessions/{sessionId}/mcp``).
@@ -106,6 +205,31 @@ function piResultFromMcpResponse(json) {
  * the correct machine with the session's terminal/workspace). The extension
  * already carries ``serverUrl`` + ``sessionId`` + ``authHeaders`` in its config,
  * so no extra relay process is needed.
+ *
+ * **ASK policy / elicitation round-trip (MRTR).** When the tool is gated by an
+ * ASK policy the proxy returns HTTP 200 with an ``input_required`` result
+ * (``{resultType, inputRequests, requestState}``) instead of executing. We must
+ * NOT hand that envelope to the model as a result — it neither prompts nor runs
+ * the tool. Mirroring ``ProxyMcpManager.dispatch()``, we resolve the human
+ * verdict and retry once with the decision in ``inputResponses``:
+ *   1. Long-poll ``POST /policies/evaluate`` via ``evalNativePolicyHttp`` — the
+ *      SAME server-side ASK park the non-bridged hook uses. It holds the
+ *      connection until a human resolves the approval card and collapses to a
+ *      hard ALLOW / DENY (the extension has no in-process approval Future like
+ *      the runner, so the long-poll IS its park/resolve mechanism).
+ *   2. Retry the ``tools/call`` ONCE with ``requestState`` + ``inputResponses:
+ *      {elicitationId: {action: "accept" | "decline"}}``. The server re-evaluates
+ *      TOOL_CALL policy on the retry (it does not trust the client's claim
+ *      blindly), so a still-denied tool stays denied.
+ *   3. Cap at one retry; fail CLOSED (``isError: true``, readable message) if the
+ *      approval cannot be resolved or the proxy still asks after the retry.
+ *
+ * (Trade-off: the proxy's ASK already published one approval card, and the
+ * evaluate long-poll publishes a second one — the extension cannot re-attach to
+ * the proxy-minted elicitation, whose id is in a different namespace. The human
+ * resolves the evaluate card to drive the verdict; the proxy card is orphaned.
+ * This is a UX wrinkle, not a security gap: the tool only runs on a genuine
+ * human accept, and the server re-checks policy on the retry.)
  *
  * Fail-safe: any transport/parse error resolves to a readable tool-result error
  * (``isError: true``) rather than throwing, so a server hiccup never wedges Pi's
@@ -125,46 +249,63 @@ async function callOmnigentTool(config, toolName, args) {
       isError: true,
     };
   }
-  const url = `${config.serverUrl}/v1/sessions/${encodeURIComponent(config.sessionId)}/mcp`;
-  const body = JSON.stringify({
-    jsonrpc: "2.0",
-    id: 1,
-    method: "tools/call",
-    params: { name: toolName, arguments: args || {} },
-  });
-  try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        ...(config.authHeaders || {}),
-      },
-      body,
-    });
-    if (!resp.ok) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Omnigent tool call failed: HTTP ${resp.status}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-    const json = await resp.json();
-    return piResultFromMcpResponse(json);
-  } catch (err) {
+
+  const first = await postMcpToolsCall(config, toolName, args, 1);
+  if (first.piResult) return first.piResult;
+  const initial = mcpInputRequired(first.json);
+  if (initial === null) {
+    // ALLOW / DENY / executed — map directly to a Pi tool result.
+    return piResultFromMcpResponse(first.json);
+  }
+
+  // ── ASK: resolve the human verdict, then retry once (MRTR) ──────────
+  if (!initial.elicitationId || !initial.requestState) {
+    // Malformed input_required — cannot retry. Fail CLOSED.
     return {
       content: [
         {
           type: "text",
-          text: `Omnigent tool call failed: ${err && err.message ? err.message : String(err)}`,
+          text: "Omnigent tool call requires approval but the server sent no resolvable elicitation",
         },
       ],
       isError: true,
     };
   }
+
+  const verdict = await evalNativePolicyHttp(config, toolName, args || {});
+  if (verdict === null) {
+    // The approval gate is structurally unavailable (no server/session/fetch,
+    // or a transport error) — fail CLOSED rather than report false success.
+    return {
+      content: [
+        {
+          type: "text",
+          text: "Omnigent tool call requires approval but the policy server was unreachable",
+        },
+      ],
+      isError: true,
+    };
+  }
+  const action = verdict.block ? "decline" : "accept";
+
+  const retry = await postMcpToolsCall(config, toolName, args, 2, {
+    requestState: initial.requestState,
+    inputResponses: { [initial.elicitationId]: { action } },
+  });
+  if (retry.piResult) return retry.piResult;
+  if (mcpInputRequired(retry.json) !== null) {
+    // The proxy asked again after one approval round — do NOT loop. Fail CLOSED.
+    return {
+      content: [
+        {
+          type: "text",
+          text: "Omnigent tool call still requires approval after one round — not retrying",
+        },
+      ],
+      isError: true,
+    };
+  }
+  return piResultFromMcpResponse(retry.json);
 }
 
 function textFromContent(content) {

@@ -398,3 +398,267 @@ require(extensionPath)(pi);
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_input_required_approve_round_trips_then_executes(tmp_path: Path) -> None:
+    """An ASK-gated bridged tool resolves the elicitation and retries once.
+
+    On the initial ``tools/call`` the /mcp proxy returns an MCP ``input_required``
+    (MRTR) envelope instead of executing. The extension must:
+      1. long-poll ``/policies/evaluate`` for the human verdict (ALLOW here),
+      2. retry ``tools/call`` ONCE with ``requestState`` + ``inputResponses``
+         carrying the proxy's elicitation id and ``{action: "accept"}``,
+      3. surface the executed output to Pi with ``isError: false``.
+    It must NEVER hand the raw ``input_required`` envelope back as success.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the pi-native extension e2e test")
+
+    extension_path = (
+        Path(__file__).resolve().parents[1]
+        / "omnigent"
+        / "resources"
+        / "pi_native"
+        / "omnigent_pi_native_extension.js"
+    )
+
+    script = r"""
+const assert = require("assert").strict;
+const fs = require("fs");
+const path = require("path");
+
+const extensionPath = process.argv[1];
+const tmpDir = process.argv[2];
+const inboxDir = path.join(tmpDir, "inbox");
+const configPath = path.join(tmpDir, "config.json");
+
+fs.mkdirSync(inboxDir, { recursive: true });
+fs.writeFileSync(
+  configPath,
+  JSON.stringify({
+    serverUrl: "http://omnigent.test",
+    sessionId: "conv_abc",
+    inboxDir,
+    authHeaders: { authorization: "Bearer test" },
+    tools: [
+      {
+        name: "sys_os_shell",
+        description: "Run a shell command",
+        parameters: { type: "object", properties: {} },
+      },
+    ],
+  }),
+);
+
+process.env.OMNIGENT_PI_NATIVE_CONFIG = configPath;
+
+const ELICIT_ID = "elicit_abc123";
+const REQUEST_STATE = JSON.stringify({ elicitation_id: ELICIT_ID, session_id: "conv_abc" });
+
+const mcpCalls = [];
+let mcpCallCount = 0;
+global.fetch = async (url, request) => {
+  if (typeof url === "string" && url.indexOf("/policies/evaluate") !== -1) {
+    // The server-side ASK park collapses to a hard ALLOW after the human approves.
+    return { ok: true, async json() { return { result: "POLICY_ACTION_ALLOW" }; } };
+  }
+  // /mcp proxy.
+  mcpCallCount += 1;
+  mcpCalls.push({ url, body: JSON.parse(request.body) });
+  if (mcpCallCount === 1) {
+    // First call → ASK → input_required (MRTR envelope).
+    return {
+      ok: true,
+      async json() {
+        return {
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            resultType: "input_required",
+            inputRequests: { [ELICIT_ID]: { method: "elicitation/create", params: {} } },
+            requestState: REQUEST_STATE,
+          },
+        };
+      },
+    };
+  }
+  // Retry (post-approval) → executed result.
+  return {
+    ok: true,
+    async json() {
+      return { jsonrpc: "2.0", id: 2, result: { content: [{ type: "text", text: "ran ok" }] } };
+    },
+  };
+};
+global.setInterval = () => ({ fakeInterval: true });
+
+const registered = {};
+const pi = {
+  registerCommand() {},
+  on() {},
+  registerTool(spec) { registered[spec.name] = spec; },
+  sendUserMessage() {},
+};
+
+require(extensionPath)(pi);
+
+(async () => {
+  const result = await registered.sys_os_shell.execute("call-1", {});
+
+  // Exactly two /mcp calls: the initial ASK and ONE approval retry.
+  assert.equal(mcpCallCount, 2, JSON.stringify(mcpCalls));
+  const retry = mcpCalls[1].body;
+  assert.equal(retry.id, 2, "retry must use a different JSON-RPC id");
+  assert.equal(retry.params.requestState, REQUEST_STATE);
+  assert.deepEqual(retry.params.inputResponses, {
+    [ELICIT_ID]: { action: "accept" },
+  });
+
+  // The executed output surfaces as a normal (non-error) tool result.
+  assert.ok(result && Array.isArray(result.content), JSON.stringify(result));
+  assert.equal(result.content[0].text, "ran ok");
+  assert.equal(result.isError, false);
+})().catch((error) => {
+  console.error(error && error.stack ? error.stack : error);
+  process.exit(1);
+});
+"""
+
+    result = subprocess.run(
+        [node, "-e", script, str(extension_path), str(tmp_path)],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_input_required_denied_fails_closed_not_false_success(tmp_path: Path) -> None:
+    """A declined ASK gate fails CLOSED (isError) — never reports false success.
+
+    When the elicitation park collapses to DENY, the extension retries once with
+    ``{action: "decline"}``; the proxy returns a -32000 error which surfaces as an
+    ``isError: true`` tool result. The raw ``input_required`` envelope must never
+    be returned to the model as a successful result.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the pi-native extension e2e test")
+
+    extension_path = (
+        Path(__file__).resolve().parents[1]
+        / "omnigent"
+        / "resources"
+        / "pi_native"
+        / "omnigent_pi_native_extension.js"
+    )
+
+    script = r"""
+const assert = require("assert").strict;
+const fs = require("fs");
+const path = require("path");
+
+const extensionPath = process.argv[1];
+const tmpDir = process.argv[2];
+const inboxDir = path.join(tmpDir, "inbox");
+const configPath = path.join(tmpDir, "config.json");
+
+fs.mkdirSync(inboxDir, { recursive: true });
+fs.writeFileSync(
+  configPath,
+  JSON.stringify({
+    serverUrl: "http://omnigent.test",
+    sessionId: "conv_abc",
+    inboxDir,
+    authHeaders: {},
+    tools: [
+      { name: "sys_os_shell", description: "", parameters: { type: "object", properties: {} } },
+    ],
+  }),
+);
+
+process.env.OMNIGENT_PI_NATIVE_CONFIG = configPath;
+
+const ELICIT_ID = "elicit_deny";
+const REQUEST_STATE = JSON.stringify({ elicitation_id: ELICIT_ID, session_id: "conv_abc" });
+
+let mcpCallCount = 0;
+let lastRetryBody = null;
+global.fetch = async (url, request) => {
+  if (typeof url === "string" && url.indexOf("/policies/evaluate") !== -1) {
+    // The human declined → the ASK park collapses to DENY.
+    return { ok: true, async json() { return { result: "POLICY_ACTION_DENY", reason: "nope" }; } };
+  }
+  mcpCallCount += 1;
+  if (mcpCallCount === 1) {
+    return {
+      ok: true,
+      async json() {
+        return {
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            resultType: "input_required",
+            inputRequests: { [ELICIT_ID]: { method: "elicitation/create", params: {} } },
+            requestState: REQUEST_STATE,
+          },
+        };
+      },
+    };
+  }
+  lastRetryBody = JSON.parse(request.body);
+  // Server denies the declined retry with the MCP -32000 convention.
+  return {
+    ok: true,
+    async json() {
+      return {
+        jsonrpc: "2.0",
+        id: 2,
+        error: { code: -32000, message: "Tool call denied by user" },
+      };
+    },
+  };
+};
+global.setInterval = () => ({ fakeInterval: true });
+
+const registered = {};
+const pi = {
+  registerCommand() {},
+  on() {},
+  registerTool(spec) { registered[spec.name] = spec; },
+  sendUserMessage() {},
+};
+
+require(extensionPath)(pi);
+
+(async () => {
+  const result = await registered.sys_os_shell.execute("call-1", {});
+
+  assert.equal(mcpCallCount, 2, "expected one approval retry");
+  assert.deepEqual(lastRetryBody.params.inputResponses, {
+    [ELICIT_ID]: { action: "decline" },
+  });
+
+  // Must surface as an error, NOT a false success, and must not leak the raw
+  // input_required envelope.
+  assert.equal(result.isError, true, JSON.stringify(result));
+  assert.ok(result.content[0].text.indexOf("denied") !== -1, result.content[0].text);
+  assert.equal(result.content[0].text.indexOf("input_required"), -1, result.content[0].text);
+})().catch((error) => {
+  console.error(error && error.stack ? error.stack : error);
+  process.exit(1);
+});
+"""
+
+    result = subprocess.run(
+        [node, "-e", script, str(extension_path), str(tmp_path)],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
