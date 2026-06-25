@@ -171,15 +171,10 @@ class LLMRoutingClient:
                         ],
                     }
                 ],
-                max_output_tokens=256,
+                max_tokens=256,
             )
             verdict = json.loads(response.output_text)
-        except (
-            json.JSONDecodeError,
-            KeyError,
-            AttributeError,
-            TypeError,
-        ):
+        except Exception:  # noqa: BLE001  # fail-open: any LLM/parse error skips routing
             _logger.warning("LLMRoutingClient: judge call failed", exc_info=True)
             return None
 
