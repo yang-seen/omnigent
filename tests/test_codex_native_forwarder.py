@@ -1225,12 +1225,30 @@ async def test_reasoning_delta_skips_empty_non_opening_delta() -> None:
 
 @pytest.mark.asyncio
 async def test_persist_codex_compaction_item_posts_event() -> None:
-    """Compaction event is posted with the last item id and a Codex summary."""
+    """Compaction event includes last_item_id, summary, and compacted_messages."""
+    last_item_resp = MagicMock()
+    last_item_resp.json.return_value = {"data": [{"id": "item_codex"}]}
+    last_item_resp.raise_for_status = MagicMock()
+
+    all_items_resp = MagicMock()
+    all_items_resp.json.return_value = {
+        "data": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hi"}],
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hello"}],
+            },
+        ]
+    }
+    all_items_resp.raise_for_status = MagicMock()
+
     client = MagicMock()
-    get_resp = MagicMock()
-    get_resp.json.return_value = {"data": [{"id": "item_codex"}]}
-    get_resp.raise_for_status = MagicMock()
-    client.get = AsyncMock(return_value=get_resp)
+    client.get = AsyncMock(side_effect=[last_item_resp, all_items_resp])
 
     post_resp = MagicMock()
     post_resp.raise_for_status = MagicMock()
@@ -1244,16 +1262,21 @@ async def test_persist_codex_compaction_item_posts_event() -> None:
     assert body["type"] == "compaction"
     assert body["data"]["last_item_id"] == "item_codex"
     assert "Codex" in body["data"]["summary"]
+    assert body["data"]["compacted_messages"] is not None
+    assert len(body["data"]["compacted_messages"]) == 2
+    assert body["data"]["compacted_messages"][0]["role"] == "user"
+    assert body["data"]["compacted_messages"][1]["role"] == "assistant"
 
 
 @pytest.mark.asyncio
 async def test_persist_codex_compaction_item_empty_items_fallback() -> None:
-    """When no items exist, last_item_id falls back to compact_boundary_ prefix."""
+    """When no items exist, last_item_id falls back and no compacted_messages."""
+    empty_resp = MagicMock()
+    empty_resp.json.return_value = {"data": []}
+    empty_resp.raise_for_status = MagicMock()
+
     client = MagicMock()
-    get_resp = MagicMock()
-    get_resp.json.return_value = {"data": []}
-    get_resp.raise_for_status = MagicMock()
-    client.get = AsyncMock(return_value=get_resp)
+    client.get = AsyncMock(return_value=empty_resp)
 
     post_resp = MagicMock()
     post_resp.raise_for_status = MagicMock()
@@ -1265,3 +1288,4 @@ async def test_persist_codex_compaction_item_empty_items_fallback() -> None:
     _url, kwargs = client.post.call_args
     body = kwargs["json"]
     assert body["data"]["last_item_id"].startswith("compact_boundary_")
+    assert "compacted_messages" not in body["data"]
