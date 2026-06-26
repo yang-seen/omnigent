@@ -566,6 +566,41 @@ function senderServerUrl(event) {
 }
 
 /**
+ * Re-point the sender's window to a local server that moved to a new URL (the
+ * CLI's `server start` can't be pinned to a port, so a restart may land on a
+ * different one). No-op when the origin is unchanged. Persists the new default
+ * and migrates any hosting intent + the live host connection to the new URL so
+ * a connected runner follows the server too.
+ *
+ * @param {Electron.IpcMainInvokeEvent} event
+ * @param {string} oldServerUrl The URL the window was on.
+ * @param {string} newUrl The (re)started server's URL.
+ */
+function followLocalServerMove(event, oldServerUrl, newUrl) {
+  const newOrigin = originOf(newUrl);
+  if (!newOrigin || originOf(oldServerUrl) === newOrigin) return; // didn't move
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || win.isDestroyed()) return;
+  const ephemeral = Boolean(windows.get(win)?.ephemeral);
+  if (!ephemeral) {
+    const settings = loadSettings();
+    settings.server_url = newUrl;
+    saveSettings(settings);
+    // Carry hosting to the new URL: drop the old (now-dead) host connection and
+    // mark the new URL host-enabled so the post-load restore reconnects there.
+    if (isHostServerEnabled(oldServerUrl)) {
+      setHostServerEnabled(oldServerUrl, false);
+      setHostServerEnabled(newUrl, true);
+      const cliPath = resolvedCliPath();
+      if (cliPath) void serverManager.disconnectHost(cliPath, oldServerUrl).catch(() => {});
+    }
+  }
+  pinWindow(win, newOrigin);
+  setWindowServerUrl(win, newUrl);
+  void win.loadURL(newUrl);
+}
+
+/**
  * Notify every pinned window that host/server status may have changed, so the
  * SPA re-reads it. This is a bare ping — NOT a poll: it fires only on real
  * events (a host child connecting or exiting, and after a control action), so
@@ -1921,6 +1956,17 @@ function registerIpc() {
     else if (action === "stop") result = await serverManager.stopLocalServer(cliPath);
     else if (action === "restart") result = await serverManager.restartLocalServer(cliPath);
     else result = { ok: false, error: `unknown server action '${action}'` };
+    // The CLI's `server start` can land the (re)started server on a different
+    // port (it prefers 6767, else a free port — there's no way to pin it). If
+    // it moved, follow it: re-point this window to the new URL so it isn't left
+    // on a dead port.
+    if (
+      (action === "restart" || action === "start") &&
+      result.ok &&
+      typeof result.url === "string"
+    ) {
+      followLocalServerMove(event, serverUrl, result.url);
+    }
     broadcastHostStatus();
     return result;
   });
