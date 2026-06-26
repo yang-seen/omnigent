@@ -154,11 +154,13 @@ jobs:
           fi
 
       # Always check out the TRUSTED default branch (never PR head).
+      # TEMP(test): on the push test, the agent configs aren't on the default
+      # branch yet, so check out the pushed SHA; real triggers still use main.
       - name: Check out omnigent (code)
         if: steps.plan.outputs.proceed == 'true' && steps.creds.outputs.available == 'true'
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.event_name == 'push' && github.sha || github.event.repository.default_branch }}
           persist-credentials: false
 
       - name: Set up Python
