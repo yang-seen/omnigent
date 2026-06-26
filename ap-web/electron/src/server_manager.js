@@ -161,10 +161,14 @@ async function ensureHostConnected(cliPath, serverUrl) {
   if (inflight) return inflight;
   const op = connectHost(cliPath, serverUrl, key);
   connectingHosts.set(key, op);
+  // Surface the "connecting…" state right away (statusFor reports it while the
+  // key is in connectingHosts), then again once it settles.
+  emitChange();
   try {
     return await op;
   } finally {
     connectingHosts.delete(key);
+    emitChange();
   }
 }
 
@@ -345,12 +349,28 @@ async function statusFor(cliPath, serverUrl) {
       error: null,
     };
   }
+  const key = cli.normalizeServerUrl(serverUrl);
+  // A connect is in flight for this server (auto-restore, connect-time, or a
+  // Start that hasn't tunneled yet) — report "connecting" without a subprocess
+  // so the sidebar shows it immediately. `process: "online"` + `connected:
+  // false` is how the renderer renders the connecting state.
+  if (connectingHosts.has(key) && !ownsLiveHost(key)) {
+    return {
+      cliInstalled: true,
+      connected: false,
+      process: "online",
+      hostStatus: null,
+      sessions: 0,
+      ownedByDesktop: true,
+      error: null,
+    };
+  }
   const status = await cli.getHostStatus(cliPath, serverUrl);
   const conn = cli.connectionFromStatus(status, serverUrl);
   return {
     cliInstalled: true,
     ...conn,
-    ownedByDesktop: ownsLiveHost(cli.normalizeServerUrl(serverUrl)),
+    ownedByDesktop: ownsLiveHost(key),
   };
 }
 
