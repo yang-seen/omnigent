@@ -7,10 +7,8 @@
 Omnigent is an open-source **meta-harness** that gives you a common orchestration layer over Claude Code, Codex, Cursor, OpenCode, Hermes, Pi, and the agents you write yourself: swap or combine harnesses without rewriting, enforce policies and sandboxing, and collaborate in real time from any device — terminal, browser, phone, or the native desktop app.
 
 [![PyPI version](https://img.shields.io/pypi/v/omnigent.svg)](https://pypi.org/project/omnigent/)
-[![GitHub tag](https://img.shields.io/github/v/tag/omnigent-ai/omnigent.svg?label=tag)](https://github.com/omnigent-ai/omnigent/tags)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://github.com/omnigent-ai/omnigent/blob/main/LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/omnigent)
-[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](#1-install)
 ![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)
 
 [omnigent.ai](https://omnigent.ai) · **[⬇️ Download the macOS desktop app](https://omnigent.ai/download/mac)**
