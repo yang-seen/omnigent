@@ -54,7 +54,7 @@ function hostDisplay(status: HostStatus, pending: HostControlAction | null): Dis
   else if (connecting) statusText = "Connecting…";
   else if (status.connected) statusText = "Connected";
   else if (status.error) statusText = status.error;
-  else statusText = "Not hosting";
+  else statusText = "Connect this machine as a runner";
 
   return {
     tone,
@@ -98,13 +98,19 @@ function StatusMenu({
   canControl,
   busy,
   onAction,
+  labels,
 }: {
   title: string;
   display: Display;
   canControl: boolean;
   busy: boolean;
   onAction: (action: HostControlAction) => void;
+  /** Override the action labels (e.g. host uses "Disconnect" for stop). */
+  labels?: { start?: string; stop?: string; restart?: string };
 }) {
+  const startLabel = labels?.start ?? "Start";
+  const stopLabel = labels?.stop ?? "Stop";
+  const restartLabel = labels?.restart ?? "Restart";
   return (
     <DropdownMenu>
       <DropdownMenuTrigger
@@ -136,7 +142,7 @@ function StatusMenu({
                 onSelect={() => onAction("start")}
               >
                 <PlayIcon className="size-4 shrink-0" />
-                Start
+                {startLabel}
               </DropdownMenuItem>
             )}
             {display.active && (
@@ -147,7 +153,7 @@ function StatusMenu({
                   onSelect={() => onAction("stop")}
                 >
                   <SquareIcon className="size-4 shrink-0" />
-                  Stop
+                  {stopLabel}
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   className="gap-2"
@@ -155,7 +161,7 @@ function StatusMenu({
                   onSelect={() => onAction("restart")}
                 >
                   <RotateCwIcon className="size-4 shrink-0" />
-                  Restart
+                  {restartLabel}
                 </DropdownMenuItem>
               </>
             )}
@@ -249,6 +255,7 @@ export function HostStatusIndicator() {
         canControl={host ? host.cliInstalled : false}
         busy={pendingHost !== null}
         onAction={(action) => void runHost(action)}
+        labels={{ start: "Connect", stop: "Disconnect" }}
       />
       {server && (
         <StatusMenu
