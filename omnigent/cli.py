@@ -10836,8 +10836,8 @@ def _run_configure_harnesses_interactive() -> None:
     newly auto-configured machine credentials in a callout — then loops on
     the level-1 harness overview. Every harness is shown on a single compact
     row — the harness name on the left, then an aligned ``✓``/``✗`` status
-    column (the configured credential, or "Not installed" / "No
-    credential") — in 0.3 priority order: Claude, Codex, Cursor, OpenCode,
+    column (the configured credential, or "Not installed" / "Not configured")
+    — in 0.3 priority order: Claude, Codex, Cursor, OpenCode,
     Hermes, Pi, then Antigravity, Qwen Code, Goose, Copilot, Kiro, Kimi Code.
     The actionable hint (install command / next step) renders only for the
     highlighted row, as the selector's description line, so the overview stays
@@ -11035,15 +11035,17 @@ def _run_configure_harnesses_interactive() -> None:
                 ),
             )
 
-        # Hermes — curl-installed, no Omnigent credential, so readiness is just
-        # the binary.
+        # Hermes — curl-installed, but provider/model config is opaque until
+        # `hermes model` has been run. Treat an installed binary as
+        # "not configured" rather than ready so setup does not overstate the
+        # state of a fresh install.
         if harness_cli_installed(HERMES_KEY):
             rows.append(
                 (
                     _HERMES,
                     "Hermes",
-                    "Installed",
-                    "ready",
+                    "Not configured",
+                    "warn",
                     "Open to configure with `hermes model`.",
                 ),
             )
@@ -11155,9 +11157,13 @@ def _run_configure_harnesses_interactive() -> None:
                 ),
             )
 
-        # Kiro — native CLI, own auth via `kiro-cli login`.
+        # Kiro — native CLI, own auth via `kiro-cli login`; there is no
+        # reliable local status probe, so an installed binary is still only
+        # "not configured" until the user signs in.
         if harness_cli_installed(KIRO_KEY):
-            rows.append((_KIRO, "Kiro", "Installed", "ready", "Sign in with `kiro-cli login`."))
+            rows.append(
+                (_KIRO, "Kiro", "Not configured", "warn", "Sign in with `kiro-cli login`.")
+            )
         else:
             kiro_spec = harness_install_spec(KIRO_KEY)
             kiro_hint = (
@@ -11167,30 +11173,35 @@ def _run_configure_harnesses_interactive() -> None:
             )
             rows.append((_KIRO, "Kiro", "Not installed", "missing", _install_hint(kiro_hint)))
 
-        # Kimi Code — native CLI, own auth via `kimi login`. Curl-installed
-        # (no npm package), so use its install_hint.
+        # Kimi Code — native CLI, own auth via `kimi login`; there is no local
+        # login status probe yet. Curl-installed (no npm package), so use its
+        # install_hint when absent and show "not configured" when present.
         if harness_cli_installed(KIMI_KEY):
-            rows.append((_KIMI, "Kimi Code", "Installed", "ready", "Sign in with `kimi login`."))
+            rows.append(
+                (_KIMI, "Kimi Code", "Not configured", "warn", "Sign in with `kimi login`.")
+            )
         else:
             kimi_spec = harness_install_spec(KIMI_KEY)
             kimi_hint = (kimi_spec.install_hint if kimi_spec else None) or "see Kimi Code docs"
             rows.append((_KIMI, "Kimi Code", "Not installed", "missing", _install_hint(kimi_hint)))
         return rows
 
-    # Cap the status text so one verbose row (e.g. an OpenCode summary listing
-    # several providers) can't run off a narrow terminal.
-    max_status_width = 30
-
     while True:
         config = _load_global_config()
         harness_rows = build_harness_rows()
-        # Left-align the status into a single column a fixed gutter right of the
-        # names, so every ✓/✗ glyph lines up vertically (a ragged right-aligned
+        # Place the status in a single column a fixed gutter right of the names,
+        # so every ✓/✗ glyph lines up vertically (the earlier right-aligned
         # status scattered the glyphs and read as messy). The name column is the
         # widest harness name + a 4-space gutter; the status is escaped when
         # interpolated into markup so a credential label containing a ``[`` can't
         # parse as a Rich tag (descriptions are escaped the same way).
         name_col = max(len(name) for _t, name, *_rest in harness_rows) + 4
+        term_width = max(40, shutil.get_terminal_size(fallback=(80, 24)).columns)
+        # _render_menu prefixes selected rows with ``"    ❯  "`` (7 cells).
+        # Cap the status text from the actual terminal width so verbose status
+        # rows (e.g. OpenCode's provider summary) do not wrap in the compact
+        # single-line overview.
+        max_status_width = max(8, min(30, term_width - 7 - name_col - len("✓ ")))
         options: list[str] = []
         selectable: list[bool] = []
         row_target: list[str | None] = []
