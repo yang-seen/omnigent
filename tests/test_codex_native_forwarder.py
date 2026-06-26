@@ -22,13 +22,13 @@ import httpx
 import pytest
 
 from omnigent import codex_native_forwarder as fwd
-from omnigent.codex_native_forwarder import _persist_codex_compaction_item
 from omnigent.codex_native_bridge import (
     CodexNativeBridgeState,
     codex_home_for_bridge_dir,
     read_bridge_state,
     write_bridge_state,
 )
+from omnigent.codex_native_forwarder import _persist_codex_compaction_item
 
 
 class _RecordingClient:
