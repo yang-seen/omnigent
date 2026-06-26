@@ -1557,9 +1557,7 @@ def test_overview_marks_unconfigured_with_x_and_configured_without_checkmark(
     assert "no credential yet" in out
 
 
-def test_overview_initial_menu_shows_core_harnesses_and_more(
-    isolated_config, monkeypatch
-) -> None:
+def test_overview_initial_menu_shows_core_harnesses_and_more(isolated_config, monkeypatch) -> None:
     """The first harness menu shows the 0.3 core set and keeps extras folded."""
     frames: list[tuple[list[str], list[bool]]] = []
 

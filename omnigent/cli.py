@@ -11309,9 +11309,7 @@ def _run_configure_harnesses_interactive() -> None:
         row_target.append(_QUIT)
         if show_more_harnesses:
             rows: list[list[tuple[str, bool, str | None]]] = []
-            for option, is_selectable, target in zip(
-                options, selectable, row_target, strict=True
-            ):
+            for option, is_selectable, target in zip(options, selectable, row_target, strict=True):
                 if is_selectable or not rows:
                     rows.append([(option, is_selectable, target)])
                 else:
@@ -11333,14 +11331,10 @@ def _run_configure_harnesses_interactive() -> None:
                 _QUIT,
             ]
             ordered_rows = [
-                rows_by_target[target]
-                for target in ordered_targets
-                if target in rows_by_target
+                rows_by_target[target] for target in ordered_targets if target in rows_by_target
             ]
             options = [option for row in ordered_rows for option, _, _ in row]
-            selectable = [
-                is_selectable for row in ordered_rows for _, is_selectable, _ in row
-            ]
+            selectable = [is_selectable for row in ordered_rows for _, is_selectable, _ in row]
             row_target = [target for row in ordered_rows for _, _, target in row]
         idx = select(
             "Configure harnesses",
