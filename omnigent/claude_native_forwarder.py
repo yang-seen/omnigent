@@ -1834,10 +1834,9 @@ async def _maybe_rotate_session_on_clear(
         ``"conv_old"``.
     :param bridge_dir: Native Claude bridge directory.
     :param state: Current hook cursor state.
-    :returns: New active session id when rotation occurred, otherwise
-        ``None``.
-    :raises httpx.HTTPError: If Omnigent rejects the create, bind, transfer,
-        or old-session clear calls.
+    :returns: New active session id when rotation succeeded, otherwise
+        ``None`` (no clear pending, or the rotation failed and was consumed
+        to avoid a re-rotation loop).
     """
     result = await asyncio.to_thread(_read_hook_events_for_state, bridge_dir, state)
     clear_record = next(
@@ -1851,14 +1850,13 @@ async def _maybe_rotate_session_on_clear(
     if clear_record is None:
         return None
 
-    if clear_record.clear_rotated_to:
-        new_session_id = clear_record.clear_rotated_to
-    else:
-        new_session_id = await _create_clear_replacement_session(
-            client=client,
-            old_session_id=session_id,
-            bridge_dir=bridge_dir,
-        )
+    # Consume this clear hook EXACTLY ONCE. If the rotation raises partway
+    # (e.g. the terminal transfer returns 400 because the target already owns a
+    # terminal), we must still advance the cursor: otherwise the forwarder's
+    # next poll re-reads the same clear record and re-rotates — creating a fresh
+    # replacement session every poll, unbounded. A single /clear rotates at most
+    # once; a failed rotation is logged and skipped (the old session simply
+    # keeps running) rather than retried forever.
     durable = HookForwardState(
         event_cursor=clear_record.event_cursor,
         byte_offset=clear_record.byte_offset,
@@ -1867,6 +1865,25 @@ async def _maybe_rotate_session_on_clear(
             clear_record.byte_offset,
         ),
     )
+    new_session_id: str | None = None
+    try:
+        if clear_record.clear_rotated_to:
+            new_session_id = clear_record.clear_rotated_to
+        else:
+            new_session_id = await _create_clear_replacement_session(
+                client=client,
+                old_session_id=session_id,
+                bridge_dir=bridge_dir,
+            )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        _logger.exception(
+            "Claude /clear rotation failed; consuming the clear hook to avoid a "
+            "re-rotation loop. old_session=%s bridge_dir=%s",
+            session_id,
+            bridge_dir,
+        )
     await _write_hook_state_async(bridge_dir, durable)
     reset_transcript_forward_state(bridge_dir, reset_hooks=False)
     return new_session_id
@@ -2011,24 +2028,20 @@ async def _maybe_rotate_session_on_fork(
         ``"conv_old"``.
     :param bridge_dir: Native Claude bridge directory.
     :param state: Current hook cursor state.
-    :returns: New active session id when fork rotation occurred,
-        otherwise ``None``.
-    :raises httpx.HTTPError: If Omnigent rejects the fork, bind, transfer,
-        or old-session clear calls.
+    :returns: New active session id when fork rotation succeeded, otherwise
+        ``None`` (no fork pending, or the rotation failed and was consumed to
+        avoid a re-rotation loop).
     """
     result = await asyncio.to_thread(_read_hook_events_for_state, bridge_dir, state)
     fork_record = next((record for record in result.records if _is_fork_hook_record(record)), None)
     if fork_record is None:
         return None
 
-    if fork_record.fork_rotated_to:
-        new_session_id = fork_record.fork_rotated_to
-    else:
-        new_session_id = await _create_fork_replacement_session(
-            client=client,
-            old_session_id=session_id,
-            bridge_dir=bridge_dir,
-        )
+    # Consume this fork hook EXACTLY ONCE — see the matching guard in
+    # _maybe_rotate_session_on_clear. A rotation that raises partway (e.g. a
+    # terminal-transfer 400) must still advance the cursor so the next poll does
+    # not re-read the same fork record and create another replacement session
+    # without bound.
     durable = HookForwardState(
         event_cursor=fork_record.event_cursor,
         byte_offset=fork_record.byte_offset,
@@ -2037,6 +2050,25 @@ async def _maybe_rotate_session_on_fork(
             fork_record.byte_offset,
         ),
     )
+    new_session_id: str | None = None
+    try:
+        if fork_record.fork_rotated_to:
+            new_session_id = fork_record.fork_rotated_to
+        else:
+            new_session_id = await _create_fork_replacement_session(
+                client=client,
+                old_session_id=session_id,
+                bridge_dir=bridge_dir,
+            )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        _logger.exception(
+            "Claude /fork rotation failed; consuming the fork hook to avoid a "
+            "re-rotation loop. old_session=%s bridge_dir=%s",
+            session_id,
+            bridge_dir,
+        )
     await _write_hook_state_async(bridge_dir, durable)
     await _seed_fork_transcript_forward_state(
         bridge_dir=bridge_dir,

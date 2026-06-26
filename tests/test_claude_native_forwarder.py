@@ -463,6 +463,91 @@ async def test_clear_hook_rotation_survives_old_runner_clear_failure(
 
 
 @pytest.mark.asyncio
+async def test_clear_hook_transfer_failure_does_not_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A terminal-transfer failure during /clear must NOT spin into a session loop.
+
+    Regression guard for the unbounded-session-creation bug: when the terminal
+    transfer fails (e.g. 400 because the target already owns a terminal), the
+    rotation must still consume the clear hook so the forwarder's next poll does
+    not re-rotate and create another replacement session every tick.
+    """
+    monkeypatch.setattr("omnigent.claude_native_bridge._BRIDGE_ROOT", tmp_path / "root")
+    bridge_dir = prepare_bridge_dir(
+        "conv_old",
+        bridge_id="bridge_shared",
+        workspace=tmp_path,
+    )
+    record_hook_event(
+        bridge_dir,
+        {"hook_event_name": "SessionStart", "source": "clear"},
+    )
+    create_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Mock rotation endpoints with a failing terminal transfer."""
+        nonlocal create_count
+        if request.method == "GET" and request.url.path == "/v1/sessions/conv_old":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "conv_old",
+                    "agent_id": "ag_claude",
+                    "runner_id": "runner_one",
+                    "labels": {BRIDGE_ID_LABEL_KEY: "bridge_shared"},
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/sessions":
+            create_count += 1
+            return httpx.Response(201, json={"id": "conv_new"})
+        if request.method == "PATCH" and request.url.path == "/v1/sessions/conv_new":
+            return httpx.Response(200, json={"id": "conv_new"})
+        if (
+            request.method == "POST"
+            and request.url.path
+            == "/v1/sessions/conv_old/resources/terminals/terminal_claude_main/transfer"
+        ):
+            # The failure that triggered the production loop.
+            return httpx.Response(400, json={"error": {"message": "Terminal already exists"}})
+        raise AssertionError(f"unexpected request: {request.method} {request.url.path}")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="http://ap") as client:
+        hook_state = await forwarder._ensure_hook_state(
+            bridge_dir,
+            start_at_end=False,
+            session_id="conv_old",
+        )
+        # The transfer 400 is swallowed: rotation reports no new session...
+        rotated_to = await forwarder._maybe_rotate_session_on_clear(
+            client=client,
+            session_id="conv_old",
+            bridge_dir=bridge_dir,
+            state=hook_state,
+        )
+        # ...and a second poll must NOT re-rotate (the clear hook was consumed).
+        replay_state = await forwarder._ensure_hook_state(
+            bridge_dir,
+            start_at_end=False,
+            session_id="conv_old",
+        )
+        rotated_again = await forwarder._maybe_rotate_session_on_clear(
+            client=client,
+            session_id="conv_old",
+            bridge_dir=bridge_dir,
+            state=replay_state,
+        )
+
+    assert rotated_to is None
+    assert rotated_again is None
+    # Exactly one replacement-session create — not one per poll.
+    assert create_count == 1
+
+
+@pytest.mark.asyncio
 async def test_post_clear_supersession_notifies_old_session() -> None:
     """
     A /clear rotation notifies the superseded (old) conversation.
