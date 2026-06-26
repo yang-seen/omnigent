@@ -557,6 +557,47 @@ async def test_external_session_superseded_requires_target(
     assert resp.status_code == 400
 
 
+async def test_external_session_superseded_drains_pending_inputs(
+    client: httpx.AsyncClient,
+) -> None:
+    """
+    Superseding a session discards its unconsumed pending inputs.
+
+    The ``/clear`` the user typed in the web UI is recorded as a pending input
+    but never mirrored back (the session rotated away), so it would otherwise
+    re-hydrate as a stuck optimistic bubble on every reload of the old chat.
+    The superseded handler drains it (without committing it as a user message).
+    """
+    from omnigent.runtime import pending_inputs
+
+    pending_inputs.reset_for_tests()
+    agent = await create_test_agent(client)
+    session = await _create_session(client, agent["id"])
+    try:
+        # The optimistic pending entry the web composer recorded when the user
+        # sent ``/clear`` from the UI.
+        pending_inputs.record(session["id"], [{"type": "input_text", "text": "/clear"}])
+        assert pending_inputs.snapshot_for(session["id"]) != []
+
+        resp = await client.post(
+            f"/v1/sessions/{session['id']}/events",
+            json={
+                "type": "external_session_superseded",
+                "data": {"target_conversation_id": "conv_new"},
+            },
+        )
+        assert resp.status_code in (200, 202)
+
+        # Drained — so it won't reappear from the snapshot on reload, and it was
+        # NOT committed as a message item (the fresh session stays empty: no
+        # /clear bubble was promoted into history).
+        assert pending_inputs.snapshot_for(session["id"]) == []
+        items = (await client.get(f"/v1/sessions/{session['id']}/items")).json()["data"]
+        assert not any(item["type"] == "message" for item in items)
+    finally:
+        pending_inputs.reset_for_tests()
+
+
 # ── POST /v1/sessions/{id}/events external_subagent_start ─────────
 
 

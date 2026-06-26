@@ -5377,6 +5377,24 @@ def _publish_session_superseded(session_id: str, target_conversation_id: str) ->
         reason="clear",
     )
     session_stream.publish(session_id, event.model_dump())
+    # Discard any unconsumed pending inputs on the superseded session — notably
+    # the ``/clear`` the user typed in the web UI. ``/clear`` is never mirrored
+    # back as a committed item (the session rotated away), so its pending entry
+    # would otherwise linger forever as a stuck optimistic bubble, re-hydrating
+    # from the snapshot on every reload of the old chat. Live viewers already
+    # drop the bubble on the ``session.superseded`` event above; this stops it
+    # coming back. We deliberately do NOT emit ``session.input.consumed`` (that
+    # would commit ``/clear`` as a user message) — the persisted clear notice
+    # already explains the rotation, so the input is simply abandoned.
+    discarded = 0
+    while pending_inputs.resolve_oldest(session_id) is not None:
+        discarded += 1
+    if discarded:
+        _logger.info(
+            "Discarded %d unconsumed pending input(s) on superseded session %s",
+            discarded,
+            session_id,
+        )
 
 
 async def _get_runner_client(
