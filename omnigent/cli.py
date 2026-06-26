@@ -11186,10 +11186,10 @@ def _run_configure_harnesses_interactive() -> None:
         # Left-align the status into a single column a fixed gutter right of the
         # names, so every ✓/✗ glyph lines up vertically (a ragged right-aligned
         # status scattered the glyphs and read as messy). The name column is the
-        # widest harness name + a 2-space gutter; the status is escaped when
+        # widest harness name + a 4-space gutter; the status is escaped when
         # interpolated into markup so a credential label containing a ``[`` can't
         # parse as a Rich tag (descriptions are escaped the same way).
-        name_col = max(len(name) for _t, name, *_rest in harness_rows) + 2
+        name_col = max(len(name) for _t, name, *_rest in harness_rows) + 4
         options: list[str] = []
         selectable: list[bool] = []
         row_target: list[str | None] = []
