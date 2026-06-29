@@ -1146,9 +1146,11 @@ def test_configure_models_add_other_provider_prompts_for_name(
     # "Other" is openai-family, so it lives in the Codex add menu. L1 2=Codex
     # → L2 1=+Add → openai menu 6="Other provider — API key" (order: OpenAI
     # key, ChatGPT sub, Gateway, OpenRouter, Databricks, Other) → which
-    # provider → xAI(1) → NAME "my-xai" → key → default model blank → L2
+    # provider → xAI(1) → NAME "my-xai" → key → default model "grok-3" → L2
     # q=back → L1 q=exit.
-    stdin = "\n".join(["2", "1", "6", "1", "my-xai", "sk-xai-test", "", "q", "q"]) + "\n"
+    # Provide an explicit model (not blank): xAI has no pinned default in
+    # _DEFAULT_MODEL_OVERRIDE, so click.prompt(default=None) requires input.
+    stdin = "\n".join(["2", "1", "6", "1", "my-xai", "sk-xai-test", "grok-3", "q", "q"]) + "\n"
     result = CliRunner().invoke(cli, ["setup", "--no-internal-beta"], input=stdin)
     assert result.exit_code == 0, result.output
 
