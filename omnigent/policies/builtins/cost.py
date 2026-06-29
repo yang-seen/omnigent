@@ -670,7 +670,7 @@ def _subtree_cost_usd(event: PolicyEvent) -> float:
 
 
 def subagent_cost_budget(
-    max_cost_usd: float,
+    max_cost_usd: float | None = None,
     ask_thresholds_usd: list[float] | None = None,
     expensive_models: list[str] | None = None,
 ) -> PolicyCallable:
@@ -690,20 +690,24 @@ def subagent_cost_budget(
     stays local to the child's ``session_state`` — it is NOT routed to
     the root conversation, so approvals are scoped to the subagent.
 
-    :param max_cost_usd: Hard limit in USD for the subtree. Must be
-        ``> 0``.
+    :param max_cost_usd: Optional hard limit in USD for the subtree. Must be
+        ``> 0`` if provided. Either this or ask_thresholds_usd must be set.
     :param ask_thresholds_usd: Optional soft warning checkpoints in USD.
         Same semantics as :func:`cost_budget`.
     :param expensive_models: Optional case-insensitive substring tokens.
         Same semantics as :func:`cost_budget`.
     :returns: A policy callable implementing the subtree budget gate.
-    :raises ValueError: Same validation as :func:`cost_budget`.
+    :raises ValueError: If neither max_cost_usd nor ask_thresholds_usd is set,
+        or if validation fails.
     """
-    if max_cost_usd <= 0:
+    # At least one of max_cost_usd or ask_thresholds_usd must be present.
+    if max_cost_usd is None and not ask_thresholds_usd:
+        raise ValueError("subagent_cost_budget requires max_cost_usd and/or ask_thresholds_usd")
+    if max_cost_usd is not None and max_cost_usd <= 0:
         raise ValueError(f"max_cost_usd must be > 0, got {max_cost_usd!r}")
     thresholds = sorted({float(t) for t in (ask_thresholds_usd or [])})
     for t in thresholds:
-        if not (0 < t < max_cost_usd):
+        if max_cost_usd is not None and not (0 < t < max_cost_usd):
             raise ValueError(
                 f"each ask_thresholds_usd value must be in "
                 f"(0, max_cost_usd={max_cost_usd}), got {t!r}"
@@ -724,7 +728,8 @@ def subagent_cost_budget(
         if phase not in _GATED_PHASES:
             return _ALLOW
         cost = _subtree_cost_usd(event)
-        if cfg.hard_cap_enabled and cost >= max_cost_usd:
+        # Check hard limit if max_cost_usd is set.
+        if max_cost_usd is not None and cfg.hard_cap_enabled and cost >= max_cost_usd:
             if _model_blocked_over_budget(
                 _current_model(event), cfg.expensive_tokens, cfg.exclude_tokens
             ):
@@ -741,17 +746,19 @@ def subagent_cost_budget(
                     ),
                 }
             return _ALLOW
+        # Check soft thresholds if ask_thresholds_usd is set.
         if thresholds:
             crossed = max((t for t in thresholds if cost >= t), default=None)
             if crossed is not None:
                 state = event.get("session_state") or {}
                 approved_up_to = float(state.get(_SUBAGENT_ASK_APPROVED_KEY, 0.0) or 0.0)
                 if crossed > approved_up_to:
+                    limit_str = f" (limit ${max_cost_usd:.2f})" if max_cost_usd else ""
                     return {
                         "result": "ASK",
                         "reason": (
                             f"Subagent subtree cost ${cost:.2f} passed the ${crossed:.2f} "
-                            f"warning threshold (limit ${max_cost_usd:.2f}). Continue?"
+                            f"warning threshold{limit_str}. Continue?"
                         ),
                         "state_updates": [
                             {
@@ -876,7 +883,7 @@ POLICY_REGISTRY: list[dict[str, Any]] = [
                     "leaving only the soft thresholds.",
                 },
             },
-            "required": ["max_cost_usd"],
+            "required": [],
         },
         "internal_only": True,
     },
