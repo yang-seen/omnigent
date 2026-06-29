@@ -66,10 +66,10 @@ def append_dead_letter(
     """
     try:
         path = bridge_dir / _DEAD_LETTER_FILE
-        key = str(path)
+        capped_path = str(path)
         if path.exists() and path.stat().st_size >= _DEAD_LETTER_MAX_BYTES:
-            if key not in _dead_letter_capped:
-                _dead_letter_capped.add(key)
+            if capped_path not in _dead_letter_capped:
+                _dead_letter_capped.add(capped_path)
                 _logger.warning(
                     "dead-letter file at cap (%d bytes); not appending further "
                     "undeliverable forwards: path=%s",
