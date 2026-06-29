@@ -427,6 +427,9 @@ _DEFAULT_MODEL_OVERRIDE: dict[str, str] = {
     # OpenRouter (and the gateway add's OSS pre-fill) → a broadly-served OSS
     # model rather than an OpenAI/Anthropic id.
     "openrouter": "moonshotai/kimi-k2.6",
+    # xAI — pin the flagship so click.prompt(default=...) always has a value
+    # even when the catalog fetch is disabled (e.g. in tests).
+    "xai": "grok-3",
 }
 
 
