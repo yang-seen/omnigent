@@ -510,9 +510,7 @@ describe("itemsToBlocks — edge cases", () => {
     const userBlocks = blocks.filter((b) => b.type === "user_message") as UserMessageBlock[];
     // The compaction summary should be hidden; only "hello" and "what next?" remain
     expect(userBlocks).toHaveLength(2);
-    const texts = userBlocks.map((b) =>
-      b.content.map((c) => ("text" in c ? c.text : "")).join(""),
-    );
+    const texts = userBlocks.map((b) => b.content.map((c) => ("text" in c ? c.text : "")).join(""));
     expect(texts).toContain("hello");
     expect(texts).toContain("what next?");
     expect(texts.some((t) => t.includes("continued from a previous conversation"))).toBe(false);
