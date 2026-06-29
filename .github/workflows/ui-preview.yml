@@ -153,22 +153,50 @@ jobs:
           cp .github/ui-preview/app.py /tmp/app-deploy/
           cp .github/ui-preview/app.yaml /tmp/app-deploy/
           cp /tmp/build.tar.gz /tmp/app-deploy/
-          # Copy every built wheel and pin them all in requirements.txt so the
-          # main omnigent wheel resolves its sibling wheels (omnigent-client,
-          # omnigent-ui-sdk) from local files rather than PyPI.
-          : > /tmp/app-deploy/requirements.txt
-          for whl in dist/*.whl; do
-            name=$(basename "$whl")
-            cp "$whl" /tmp/app-deploy/
-            echo "./$name" >> /tmp/app-deploy/requirements.txt
+          cp dist/*.whl /tmp/app-deploy/
+          for whl in /tmp/app-deploy/*.whl; do
             size=$(stat -c %s "$whl")
-            echo "Wheel $name: $(numfmt --to=iec "$size")"
+            echo "Wheel $(basename "$whl"): $(numfmt --to=iec "$size")"
             if [ "$size" -gt 10485760 ]; then
-              echo "::warning::$name exceeds the 10MB Databricks Apps wheel limit"
+              echo "::warning::$(basename "$whl") exceeds the 10MB Databricks Apps wheel limit"
             fi
           done
-          echo "requirements.txt:"
-          cat /tmp/app-deploy/requirements.txt
+          # Databricks Apps must install via uv (pyproject.toml + uv.lock), NOT a
+          # plain requirements.txt: the pip path uses the platform's Python 3.11,
+          # but omnigent requires >=3.12 -- uv provisions 3.12. The three wheels
+          # are wired as local path sources so they resolve from disk, not PyPI.
+          # Mirrors deploy/databricks/deploy.py (build_uv_pyproject + run_uv_lock).
+          python - <<'PY'
+          import glob, os
+          d = "/tmp/app-deploy"
+          def whl(prefix):
+              hits = [os.path.basename(p) for p in glob.glob(f"{d}/{prefix}*.whl")]
+              assert len(hits) == 1, (prefix, hits)
+              return hits[0]
+          sources = {
+              "omnigent": whl("omnigent-"),
+              "omnigent-client": whl("omnigent_client-"),
+              "omnigent-ui-sdk": whl("omnigent_ui_sdk-"),
+          }
+          lines = [
+              "[project]",
+              'name = "omnigent-ui-preview"',
+              'version = "0.0.0"',
+              'requires-python = ">=3.12,<3.13"',
+              "dependencies = [",
+              '  "omnigent",',
+              '  "omnigent-client",',
+              '  "omnigent-ui-sdk",',
+              "]",
+              "",
+              "[tool.uv.sources]",
+              *[f'{name} = {{ path = "./{fname}" }}' for name, fname in sources.items()],
+          ]
+          open(f"{d}/pyproject.toml", "w").write("\n".join(lines) + "\n")
+          print(open(f"{d}/pyproject.toml").read())
+          PY
+          ( cd /tmp/app-deploy && uv lock --python 3.12 --index-url https://pypi.org/simple )
+          echo "app-deploy contents:"; ls -1 /tmp/app-deploy
 
       - name: Upload app files
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
