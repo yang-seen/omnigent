@@ -160,17 +160,22 @@ def test_select_artifact_store(
 
 
 @pytest.mark.asyncio
-async def test_build_app_wires_policy_store_routes_and_config(
+async def test_build_app_wires_policy_store_routes_and_api_defaults(
     db_uri: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Docker build_app must enable persisted policy APIs and config policies."""
+    """Docker build_app must enable the persisted policy APIs."""
     from deploy.docker.entrypoint import _ResolvedConfig, build_app
     from omnigent.runtime import get_caps, get_policy_store
+    from omnigent.server.auth import RESERVED_USER_LOCAL
+    from omnigent.stores.permission_store.sqlalchemy_store import (
+        SqlAlchemyPermissionStore,
+    )
     from omnigent.stores.policy_store.sqlalchemy_store import SqlAlchemyPolicyStore
 
     monkeypatch.setenv("OMNIGENT_AUTH_ENABLED", "0")
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
     monkeypatch.delenv("OMNIGENT_AUTH_PROVIDER", raising=False)
 
     fake_module = types.ModuleType("tests.fake_policy_module")
@@ -192,12 +197,6 @@ async def test_build_app_wires_policy_store_routes_and_config(
     built = build_app(
         _ResolvedConfig(
             cfg={
-                "policies": {
-                    "admin_default": {
-                        "type": "function",
-                        "handler": "tests.fake_policy_module.allow_all",
-                    },
-                },
                 "policy_modules": ["tests.fake_policy_module"],
             },
             database_url=db_uri,
@@ -209,7 +208,7 @@ async def test_build_app_wires_policy_store_routes_and_config(
     )
 
     assert isinstance(get_policy_store(), SqlAlchemyPolicyStore)
-    assert [policy.name for policy in get_caps().default_policies] == ["admin_default"]
+    assert get_caps().default_policies == []
 
     route_paths = {route.path for route in built.app.routes}
     assert "/v1/policies" in route_paths
@@ -217,6 +216,8 @@ async def test_build_app_wires_policy_store_routes_and_config(
     assert "/v1/sessions/{session_id}/policies" in route_paths
     assert "/v1/sessions/{session_id}/policies/{policy_id}" in route_paths
     assert "/v1/sessions/{session_id}/policies/evaluate" in route_paths
+
+    SqlAlchemyPermissionStore(db_uri).ensure_user(RESERVED_USER_LOCAL, is_admin=True)
 
     async with built.app.router.lifespan_context(built.app):
         async with httpx.AsyncClient(
@@ -239,3 +240,7 @@ async def test_build_app_wires_policy_store_routes_and_config(
             )
             assert create_resp.status_code == 200
             assert create_resp.json()["name"] == "custom_default"
+
+            list_resp = await client.get("/v1/policies")
+            assert list_resp.status_code == 200
+            assert [policy["name"] for policy in list_resp.json()["data"]] == ["custom_default"]

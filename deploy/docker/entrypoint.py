@@ -277,7 +277,7 @@ def build_app(resolved_config: _ResolvedConfig | None = None) -> _BuiltApp:
     from omnigent.runtime.agent_cache import AgentCache
     from omnigent.runtime.caps import RuntimeCaps
     from omnigent.server.managed_hosts import parse_sandbox_config
-    from omnigent.spec import parse_default_policies, parse_server_llm
+    from omnigent.spec import parse_server_llm
     from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
     from omnigent.stores.comment_store.sqlalchemy_store import (
         SqlAlchemyCommentStore,
@@ -315,7 +315,6 @@ def build_app(resolved_config: _ResolvedConfig | None = None) -> _BuiltApp:
     init_runtime(
         agent_cache=agent_cache,
         caps=RuntimeCaps(
-            default_policies=parse_default_policies(cfg.get("policies")),
             llm=parse_server_llm(cfg.get("llm")),
         ),
         agent_store=agent_store,

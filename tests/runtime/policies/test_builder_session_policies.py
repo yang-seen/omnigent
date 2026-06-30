@@ -340,12 +340,6 @@ def test_build_engine_includes_persisted_default_policies(db_uri: str) -> None:
     :param db_uri: Per-test SQLite URI.
     """
     handler = "tests.resources.examples._shared.tool_functions.block_long_sleep"
-    yaml_admin_policy = FunctionPolicySpec(
-        name="yaml_admin_policy",
-        on=None,
-        function=FunctionRef(path=handler),
-    )
-
     conv_store = SqlAlchemyConversationStore(db_uri)
     conv = conv_store.create_conversation()
     policy_store = SqlAlchemyPolicyStore(db_uri)
@@ -367,13 +361,11 @@ def test_build_engine_includes_persisted_default_policies(db_uri: str) -> None:
         spec=_make_minimal_spec(),
         conversation_id=conv.id,
         conversation_store=conv_store,
-        default_policies=[yaml_admin_policy],
         policy_store=policy_store,
     )
 
     names = [p.spec.name for p in engine.policies]
     assert names == [
-        "yaml_admin_policy",
         "persisted_admin_policy",
         "__ask_on_add_policy",
     ]
