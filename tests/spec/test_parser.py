@@ -95,6 +95,29 @@ def test_parse_full_config(tmp_path: Path) -> None:
     assert spec.params == {"max_results": 10, "prefer_recent": True}
 
 
+def test_parse_executor_allowed_harnesses_preserves_list(tmp_path: Path) -> None:
+    """Sub-agent harness override allowlists must survive YAML parsing as lists."""
+    config = {
+        "spec_version": 1,
+        "name": "worker",
+        "executor": {
+            "type": "omnigent",
+            "config": {
+                "harness": "codex-native",
+                "allowed_harnesses": ["codex-native", "claude-native"],
+            },
+        },
+    }
+    (tmp_path / "config.yaml").write_text(yaml.dump(config))
+
+    spec = parse(tmp_path)
+
+    assert spec.executor.config["allowed_harnesses"] == [
+        "codex-native",
+        "claude-native",
+    ]
+
+
 def test_parse_llm_missing_model(tmp_path: Path) -> None:
     config = {"spec_version": 1, "llm": {"max_completion_tokens": 100}}
     (tmp_path / "config.yaml").write_text(yaml.dump(config))

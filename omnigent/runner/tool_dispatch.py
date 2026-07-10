@@ -1726,7 +1726,12 @@ async def _execute_subagent_tool(
                 agent_spec=agent_spec,
                 harness=child_harness,
             )
-        resp = await server_client.post("/v1/sessions", json=create_body, timeout=30.0)
+        resp = await server_client.post(
+            "/v1/sessions",
+            json=create_body,
+            headers={"x-omnigent-defer-runner-init": "1"},
+            timeout=30.0,
+        )
         if resp.status_code >= 400:
             return f"Error: failed to create child session: {resp.status_code} {resp.text[:200]}"
         child_data = resp.json()
