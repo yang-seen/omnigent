@@ -89,7 +89,7 @@ _YAML_1_2_BOOL_RE = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")
 
 # ``executor.config`` keys kept as their nested YAML structure instead of
 # string-coerced — their consumers read the nested mapping/list shape.
-_STRUCTURED_EXECUTOR_CONFIG_KEYS: frozenset[str] = frozenset()
+_STRUCTURED_EXECUTOR_CONFIG_KEYS: frozenset[str] = frozenset({"allowed_harnesses"})
 for _ch in list(_ConfigYamlLoader.yaml_implicit_resolvers.keys()):
     _ConfigYamlLoader.yaml_implicit_resolvers[_ch] = [
         (tag, regexp)

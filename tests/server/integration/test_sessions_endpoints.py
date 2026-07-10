@@ -139,6 +139,116 @@ async def test_create_session_without_title_returns_none(
     assert session["title"] is None
 
 
+async def test_create_named_subagent_defer_runner_init_header_skips_runner_notify(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sys_session_send can defer create-time runner init for named children."""
+    from omnigent.server.routes import sessions as sessions_module
+
+    class _RunnerClient:
+        def __init__(self) -> None:
+            self.posts: list[dict[str, Any]] = []
+
+        async def post(
+            self,
+            url: str,
+            *,
+            json: dict[str, Any],
+            timeout: float,
+        ) -> httpx.Response:
+            self.posts.append({"url": url, "json": json, "timeout": timeout})
+            return httpx.Response(200, request=httpx.Request("POST", url))
+
+    runner_client = _RunnerClient()
+
+    async def _fake_get_runner_client(
+        _session_id: str,
+        _runner_router: Any,
+    ) -> _RunnerClient:
+        return runner_client
+
+    monkeypatch.setattr(sessions_module, "_get_runner_client", _fake_get_runner_client)
+
+    agent = await create_test_agent(client)
+    parent = await _create_session(client, agent["id"])
+    runner_client.posts.clear()
+
+    resp = await client.post(
+        "/v1/sessions",
+        headers={"x-omnigent-defer-runner-init": "1"},
+        json={
+            "agent_id": agent["id"],
+            "parent_session_id": parent["id"],
+            "sub_agent_name": "worker",
+            "title": "worker:probe",
+        },
+    )
+
+    assert resp.status_code == 201, resp.text
+    assert runner_client.posts == []
+
+
+async def test_create_named_subagent_without_defer_header_notifies_runner(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Normal named child creation still runs the create-time runner init."""
+    from omnigent.server.routes import sessions as sessions_module
+
+    class _RunnerClient:
+        def __init__(self) -> None:
+            self.posts: list[dict[str, Any]] = []
+
+        async def post(
+            self,
+            url: str,
+            *,
+            json: dict[str, Any],
+            timeout: float,
+        ) -> httpx.Response:
+            self.posts.append({"url": url, "json": json, "timeout": timeout})
+            return httpx.Response(200, request=httpx.Request("POST", url))
+
+    runner_client = _RunnerClient()
+
+    async def _fake_get_runner_client(
+        _session_id: str,
+        _runner_router: Any,
+    ) -> _RunnerClient:
+        return runner_client
+
+    monkeypatch.setattr(sessions_module, "_get_runner_client", _fake_get_runner_client)
+
+    agent = await create_test_agent(client)
+    parent = await _create_session(client, agent["id"])
+    runner_client.posts.clear()
+
+    resp = await client.post(
+        "/v1/sessions",
+        json={
+            "agent_id": agent["id"],
+            "parent_session_id": parent["id"],
+            "sub_agent_name": "worker",
+            "title": "worker:probe",
+        },
+    )
+
+    assert resp.status_code == 201, resp.text
+    child = resp.json()
+    assert runner_client.posts == [
+        {
+            "url": "/v1/sessions",
+            "json": {
+                "session_id": child["id"],
+                "agent_id": agent["id"],
+                "sub_agent_name": "worker",
+            },
+            "timeout": 10.0,
+        }
+    ]
+
+
 # ── GET /v1/sessions (list) ──────────────────────────────
 
 
