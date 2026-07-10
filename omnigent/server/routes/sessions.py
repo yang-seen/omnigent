@@ -14109,6 +14109,19 @@ def create_sessions_router(
         # the spec and cache sub_agent_name before the first turn.
         # Without this, the runner doesn't know this session exists
         # until the first forwarded event.
+        #
+        # sys_session_send is the exception: the parent runner is the
+        # caller currently executing the MCP tool, and the server's
+        # create-time callback targets that same runner through the same
+        # tunnel. The following child message event can initialize the
+        # child session from the persisted snapshot, so skip this
+        # synchronous callback for that internal path to avoid a
+        # runner<->server re-entrant stall during fan-out.
+        _defer_runner_init = (
+            request.headers.get("x-omnigent-defer-runner-init") == "1"
+            and body.parent_session_id is not None
+            and body.sub_agent_name is not None
+        )
         conv = conversation_store.get_conversation(resp.id)
         # Mark the terminal spin-up flag at creation — the earliest
         # possible point — for a host-launched terminal-first session
@@ -14129,7 +14142,11 @@ def create_sessions_router(
         )
         if _terminal_first_create:
             _publish_terminal_pending(resp.id, True)
-        _rc = await _get_runner_client(resp.id, runner_router)
+        _rc = (
+            None
+            if _defer_runner_init
+            else await _get_runner_client(resp.id, runner_router)
+        )
         if _rc is not None and conv is not None:
             try:
                 await _rc.post(
