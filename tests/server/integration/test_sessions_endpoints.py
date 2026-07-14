@@ -7393,3 +7393,69 @@ async def test_non_native_message_still_raises_when_runner_offline(
     assert resp.status_code >= 400, resp.text
     items = (await client.get(f"/v1/sessions/{sid}/items")).json()["data"]
     assert [i for i in items if i["type"] == "error"] == []
+
+
+@pytest.mark.parametrize("failure_mode", ["transport_error", "bare_connection_error"])
+async def test_message_forward_failure_surfaces_runner_unavailable(
+    client: httpx.AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+) -> None:
+    """
+    A runner that is bound but unreachable surfaces 503, not silent 200.
+
+    Before the fix (issue #2428): when a bound runner's /events POST
+    failed with an HTTPError or ConnectionError, _forward_event_to_runner
+    swallowed the exception, returned the persisted item id, and the
+    server responded 200 ``{queued: true}`` as if the turn had been
+    accepted. The message was persisted but never delivered — the runner
+    never saw it, so no turn started. For sys_session_send orchestration
+    patterns this left the parent permanently blocked on sys_read_inbox.
+
+    After the fix: the exception is re-raised as RUNNER_UNAVAILABLE (503)
+    so the caller (e.g. _send_to_existing_session) can detect the failure,
+    unregister the orphaned work entry, and let the LLM fall back to
+    spawning a fresh session.
+    """
+    from omnigent.server.routes import sessions as sessions_module
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path.endswith("/events"):
+            if failure_mode == "transport_error":
+                raise httpx.ConnectError("runner unreachable")
+            # Bare ConnectionError: what WSTunnelTransport raises on tunnel close.
+            raise ConnectionError("tunnel closed mid-request")
+        return httpx.Response(202, json={})
+
+    fake_runner = httpx.AsyncClient(
+        transport=httpx.MockTransport(_handler),
+        base_url="http://runner",
+    )
+
+    async def _fake_get_runner_client(
+        session_id: str,
+        runner_router: object,
+    ) -> httpx.AsyncClient | None:
+        del session_id, runner_router
+        return fake_runner
+
+    monkeypatch.setattr(sessions_module, "_get_runner_client", _fake_get_runner_client)
+    try:
+        agent = await create_test_agent(client)
+        session = await _create_session(client, agent["id"])
+        sid = session["id"]
+
+        resp = await client.post(
+            f"/v1/sessions/{sid}/events",
+            json={
+                "type": "message",
+                "data": {"role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+            },
+        )
+        # Must surface as RUNNER_UNAVAILABLE (503), not a silent 200.
+        assert resp.status_code == 503, (
+            f"Expected 503 RUNNER_UNAVAILABLE when runner forward fails, "
+            f"got {resp.status_code}: {resp.text}"
+        )
+    finally:
+        await fake_runner.aclose()
