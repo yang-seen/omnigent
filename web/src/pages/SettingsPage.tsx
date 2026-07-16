@@ -39,6 +39,7 @@ import {
 } from "react";
 import {
   ArchiveRestoreIcon,
+  AlertTriangleIcon,
   CheckIcon,
   KeyRoundIcon,
   LaptopMinimalIcon,
@@ -150,7 +151,15 @@ import {
   writeCustomTheme,
 } from "@/lib/customTheme";
 import { useIsEmbedded } from "@/lib/embedded";
-import { type CliStatus, getCliStatus, isElectronShell, resetCliPath } from "@/lib/nativeBridge";
+import {
+  type CliStatus,
+  getCliStatus,
+  isElectronShell,
+  resetCliPath,
+  type UpdateConfig,
+  type UpdateMode,
+  updateBridge,
+} from "@/lib/nativeBridge";
 import { cn } from "@/lib/utils";
 
 // Admin-only management surfaces, rendered as the Members / Policies settings
@@ -209,6 +218,7 @@ export function SettingsPage() {
       {section === "account" && hasAuthSession && <AccountSection />}
       {section === "archived" && <ArchivedSection />}
       {section === "cli" && isElectronShell() && <LocalCliSection />}
+      {section === "updates" && isElectronShell() && <UpdatesSection />}
     </PageScroll>
   );
 }
@@ -1338,6 +1348,155 @@ function LocalCliSection() {
               <Button variant="ghost" size="sm" disabled={busy} onClick={() => void onReset()}>
                 Reset to auto-detected
               </Button>
+            </div>
+          )}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+const UPDATE_MODE_LABELS: Record<UpdateMode, string> = {
+  default: "Automatic (check periodically, ask before installing)",
+  start: "Check when Omnigent starts",
+  manual: "Manual only",
+  none: "Off",
+};
+
+function UpdatesSection() {
+  const bridge = updateBridge();
+  const [config, setConfig] = useState<UpdateConfig | null | "loading">("loading");
+  const [saving, setSaving] = useState(false);
+  const [checking, setChecking] = useState(false);
+  const [lastCheckError, setLastCheckError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!bridge) {
+      setConfig(null);
+      return undefined;
+    }
+    let alive = true;
+    void bridge
+      .getConfig()
+      .then((nextConfig) => {
+        if (alive) setConfig(nextConfig);
+      })
+      .catch((err) => {
+        console.warn("[SettingsPage] update config read failed:", err);
+        if (alive) setConfig(null);
+      });
+    const unsubscribe = bridge.onStatus((status) => {
+      if (status.state === "error-security") {
+        setLastCheckError(status.lastError ?? "Security verification failed.");
+      } else if (status.state === "idle" && status.lastError) {
+        setLastCheckError(status.lastError);
+      } else if (
+        status.state === "checking" ||
+        status.state === "available" ||
+        status.state === "none"
+      ) {
+        setLastCheckError(null);
+      }
+    });
+    return () => {
+      alive = false;
+      unsubscribe();
+    };
+  }, [bridge]);
+
+  const persistConfig = useCallback(
+    async (patch: Partial<UpdateConfig>) => {
+      if (!bridge) return;
+      setSaving(true);
+      try {
+        const next = await bridge.setConfig(patch);
+        setConfig(next);
+      } finally {
+        setSaving(false);
+      }
+    },
+    [bridge],
+  );
+
+  const onCheck = useCallback(async () => {
+    if (!bridge) return;
+    setChecking(true);
+    setLastCheckError(null);
+    try {
+      await bridge.check();
+    } catch (err) {
+      setLastCheckError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setChecking(false);
+    }
+  }, [bridge]);
+
+  if (config === "loading") {
+    return (
+      <Section title="Updates">
+        <p className="text-sm text-muted-foreground">Checking…</p>
+      </Section>
+    );
+  }
+
+  return (
+    <Section
+      title="Updates"
+      description="Desktop app update preferences for this installed Omnigent shell."
+    >
+      {config === null ? (
+        <p className="text-sm text-muted-foreground">Update settings are unavailable.</p>
+      ) : (
+        <div className="flex max-w-2xl flex-col gap-5">
+          <label className="flex flex-col gap-2">
+            <span className="text-sm font-medium">Update mode</span>
+            <Select
+              value={config.mode}
+              onValueChange={(value) => void persistConfig({ mode: value as UpdateMode })}
+              disabled={saving}
+            >
+              <SelectTrigger className="w-full max-w-md" data-testid="update-mode-select">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {(Object.keys(UPDATE_MODE_LABELS) as UpdateMode[]).map((mode) => (
+                  <SelectItem key={mode} value={mode}>
+                    {UPDATE_MODE_LABELS[mode]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </label>
+
+          <div className="flex items-center justify-between gap-4 rounded-lg border border-border px-4 py-3">
+            <div className="flex flex-col gap-1">
+              <span className="text-sm font-medium">Install downloaded updates on next quit</span>
+              <span className="text-xs text-muted-foreground">
+                Applies only after you choose to download an update.
+              </span>
+            </div>
+            <Switch
+              checked={config.autoInstall}
+              onCheckedChange={(checked) => void persistConfig({ autoInstall: checked })}
+              disabled={saving}
+              aria-label="Install downloaded updates on next quit"
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <Button onClick={() => void onCheck()} loading={checking}>
+              Check for updates now
+            </Button>
+            {saving && <span className="text-xs text-muted-foreground">Saving…</span>}
+          </div>
+
+          {lastCheckError && (
+            <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/50 px-3 py-2 text-sm">
+              <AlertTriangleIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+              <div>
+                <div className="font-medium">Last check failed</div>
+                <div className="text-muted-foreground">{lastCheckError}</div>
+              </div>
             </div>
           )}
         </div>

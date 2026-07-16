@@ -9,6 +9,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { Conversation } from "@/hooks/useConversations";
+import type { ElectronUpdateBridge, UpdateConfig, UpdateStatus } from "@/lib/nativeBridge";
 
 const mocks = vi.hoisted(() => ({
   setTheme: vi.fn(),
@@ -186,6 +187,7 @@ beforeEach(() => {
   mocks.pages = undefined;
   mocks.projectNames = [];
   mocks.hasNextPage = false;
+  delete (window as unknown as Record<string, unknown>).omnigentDesktop;
 });
 afterEach(() => {
   cleanup();
@@ -200,7 +202,47 @@ afterEach(() => {
   for (const property of Array.from(document.documentElement.style)) {
     if (property.startsWith("--custom-")) document.documentElement.style.removeProperty(property);
   }
+  delete (window as unknown as Record<string, unknown>).omnigentDesktop;
 });
+
+const DEFAULT_UPDATE_CONFIG: UpdateConfig = {
+  mode: "default",
+  autoInstall: true,
+  skippedVersion: null,
+};
+
+function installUpdateBridge(config: UpdateConfig = DEFAULT_UPDATE_CONFIG) {
+  let onStatus: Parameters<ElectronUpdateBridge["onStatus"]>[0] | null = null;
+  const unsubscribe = vi.fn();
+  const bridge: ElectronUpdateBridge = {
+    getConfig: vi.fn().mockResolvedValue(config),
+    getStatus: vi.fn().mockResolvedValue({ state: "idle" }),
+    check: vi.fn().mockResolvedValue(undefined),
+    download: vi.fn().mockResolvedValue(undefined),
+    installNow: vi.fn().mockResolvedValue(undefined),
+    setConfig: vi.fn().mockImplementation((patch: Partial<UpdateConfig>) =>
+      Promise.resolve({
+        ...config,
+        ...patch,
+      }),
+    ),
+    onStatus: vi.fn((cb) => {
+      onStatus = cb;
+      return unsubscribe;
+    }),
+  };
+  (window as unknown as Record<string, unknown>).omnigentDesktop = {
+    kind: "electron",
+    setBadgeCount: vi.fn(),
+    notify: vi.fn(),
+    updates: bridge,
+  };
+  return {
+    bridge,
+    emitStatus: (status: UpdateStatus) => onStatus?.(status),
+    unsubscribe,
+  };
+}
 
 describe("SettingsPage", () => {
   it("renders the Appearance section and applies a theme on card click", () => {
@@ -545,6 +587,58 @@ describe("SettingsPage", () => {
     mocks.loginUrl = null;
     renderPage("/settings/account");
     expect(screen.queryByText("alice")).toBeNull();
+  });
+
+  it("persists an Updates mode change through the desktop bridge", async () => {
+    const { bridge } = installUpdateBridge();
+
+    renderPage("/settings/updates");
+    expect(await screen.findByRole("heading", { name: "Updates" })).toBeInTheDocument();
+
+    const select = screen.getByRole("combobox", { name: "Update mode" }) as HTMLSelectElement;
+    expect(select.value).toBe("default");
+    fireEvent.change(select, { target: { value: "manual" } });
+
+    await waitFor(() => {
+      expect(bridge.setConfig).toHaveBeenCalledWith({ mode: "manual" });
+    });
+  });
+
+  it("surfaces manual update-check failures in Settings", async () => {
+    const { bridge, emitStatus } = installUpdateBridge();
+    vi.mocked(bridge.check).mockRejectedValueOnce(new Error("Cannot find latest.yml: 404"));
+
+    renderPage("/settings/updates");
+    expect(await screen.findByRole("heading", { name: "Updates" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Check for updates now" }));
+
+    expect(await screen.findByText("Last check failed")).toBeInTheDocument();
+    expect(screen.getByText("Cannot find latest.yml: 404")).toBeInTheDocument();
+
+    emitStatus({ state: "checking" });
+    await waitFor(() => {
+      expect(screen.queryByText("Cannot find latest.yml: 404")).toBeNull();
+    });
+
+    emitStatus({ state: "idle", lastError: "Feed provider failed" });
+    expect(await screen.findByText("Feed provider failed")).toBeInTheDocument();
+  });
+
+  it("unsubscribes from update status events when Settings unmounts", async () => {
+    const { unsubscribe } = installUpdateBridge();
+
+    const { unmount } = renderPage("/settings/updates");
+    expect(await screen.findByRole("heading", { name: "Updates" })).toBeInTheDocument();
+
+    unmount();
+
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("hides the Updates section outside the Electron shell", () => {
+    renderPage("/settings/updates");
+    expect(screen.queryByRole("heading", { name: "Updates" })).toBeNull();
   });
 
   it("renders the Account section under OIDC (accounts off, login_url set)", async () => {

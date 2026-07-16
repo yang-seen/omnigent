@@ -28,6 +28,8 @@ const {
   shell,
   systemPreferences,
 } = require("electron");
+const { autoUpdater } = require("electron-updater");
+const { createDesktopUpdater } = require("./desktop_updater");
 const fs = require("node:fs");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
@@ -702,6 +704,27 @@ function activeWindow() {
   for (const win of windows.keys()) return win;
   return null;
 }
+
+// Desktop auto-update orchestration lives in its own module; the main process
+// only composes it with its main-process dependencies and wires the four thin
+// seams below (startup init, the Updates menu, the update IPC surface, and the
+// before-quit install handoff). Dependencies passed here are function
+// declarations (hoisted) or already-initialized bindings, so constructing at
+// module load is safe — the module never calls into them until a seam fires.
+const updater = createDesktopUpdater({
+  app,
+  BrowserWindow,
+  ipcMain,
+  dialog,
+  nativeImage,
+  autoUpdater,
+  loadSettings,
+  saveSettings,
+  isPinnedOriginSender,
+  pinnedOrigin,
+  iconPath: ICON_PNG,
+  forceDevUpdateConfig: process.env.OMNIGENT_FORCE_DEV_UPDATE_CONFIG === "1",
+});
 
 // ---------------------------------------------------------------------------
 // Persisted settings (the saved server URL and the recently-connected server
@@ -1800,6 +1823,26 @@ function buildMenu() {
     submenu: serverSubmenu,
   });
 
+  template.push({
+    label: "Updates",
+    submenu: [
+      {
+        id: "check_for_updates",
+        label: "Check for Updates…",
+        click: () => {
+          updater.checkForUpdates({ manual: true }).catch(() => {});
+        },
+      },
+      {
+        id: "restart_to_update",
+        label: "Restart to Update",
+        click: () => {
+          if (updater.getStatus().state === "downloaded") updater.installUpdateNow();
+        },
+      },
+    ],
+  });
+
   // Notifications menu (macOS only — sound playback uses `afplay`): an on/off
   // switch for the notification sound plus a picker of macOS system sounds.
   // Selections persist in settings.json and are read live by the notify
@@ -2363,6 +2406,10 @@ function registerIpc() {
     return clearCliPath();
   });
 
+  // Updater IPC surface (get/set config, get status, check/download/install).
+  // The module owns the handlers and their trusted-sender + consent gates.
+  updater.registerIpc();
+
   // SPA → start / stop / restart this machine's host daemon for the window's
   // own server (the host selection menu's "connect this machine" action).
   ipcMain.handle("omnigent:host-control", async (event, action) => {
@@ -2817,6 +2864,7 @@ if (!gotLock) {
     } else {
       createWindow();
     }
+    updater.init();
 
     app.on("activate", () => {
       // macOS: re-create the window when the dock icon is clicked and none
@@ -2856,7 +2904,9 @@ if (!gotLock) {
       .catch(() => {})
       .finally(() => {
         quitCleanupDone = true;
-        app.quit();
+        // Hand off to a user-approved install if one is pending; otherwise
+        // complete the deferred quit.
+        if (!updater.quitAndInstallIfPending()) app.quit();
       });
   });
 }
