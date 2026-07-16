@@ -862,3 +862,39 @@ class TestPinCodexConfigModel:
         # read_codex_config_model resolves codex-home under the bridge dir.
         _pin_codex_config_model(home, "databricks-gpt-5-4-mini")
         assert read_codex_config_model(bridge_dir) == "databricks-gpt-5-4-mini"
+
+
+def test_build_codex_native_server_aliases_stale_omnigent_providers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The launch config keeps Omnigent-stamped provider ids resolvable.
+
+    A thread created under a gateway default persists
+    ``model_provider="omnigent_provider"`` in its rollout; relaunching
+    its app-server under the subscription login (which pins only
+    ``model_provider="openai"``) must still define that id or
+    ``thread/resume`` hard-fails config load ("Model provider
+    `omnigent_provider` not found") and the session is unresumable.
+    """
+    monkeypatch.setattr(
+        "omnigent.codex_native_app_server._find_codex_cli",
+        lambda: sys.executable,
+    )
+    app_server = build_codex_native_server(
+        socket_path=tmp_path / "codex.sock",
+        codex_home=tmp_path / "codex-home",
+        cwd=tmp_path,
+        model=None,
+        profile=None,
+        bridge_dir=tmp_path / "bridge",
+        ap_server_url=None,
+        ap_auth_headers={},
+        extra_config_overrides=['model_provider="openai"'],
+    )
+
+    joined = "\n".join(app_server.config_overrides)
+    assert "model_providers.omnigent_provider={" in joined
+    assert "model_providers.omnigent_databricks={" in joined
+    assert "requires_openai_auth=true" in joined

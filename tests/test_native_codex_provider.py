@@ -15,8 +15,14 @@ from pathlib import Path
 import pytest
 import yaml
 
-from omnigent.codex_native_app_server import resolve_native_codex_launch
-from omnigent.inner.codex_executor import _provider_codex_config_overrides
+from omnigent.codex_native_app_server import (
+    _stale_provider_alias_overrides,
+    resolve_native_codex_launch,
+)
+from omnigent.inner.codex_executor import (
+    _databricks_codex_config_overrides,
+    _provider_codex_config_overrides,
+)
 
 
 @pytest.fixture()
@@ -436,3 +442,74 @@ def test_resolve_native_codex_launch_undismissed_config_provider_routes_via_pin(
 
     assert launch.config_overrides == ['model_provider="Databricks"']
     assert launch.profile is None
+
+
+# ── stale-provider alias overrides (cross-credential resume) ──
+#
+# A persisted Codex thread names its ``model_provider`` in the rollout
+# (e.g. ``omnigent_provider`` for a gateway-created session). Resuming
+# it under a different credential default launches an app-server whose
+# config no longer defines that id, and ``thread/resume`` hard-fails
+# config load ("Model provider `omnigent_provider` not found") — the
+# session is unresumable until the user flips the default back. The
+# alias overrides keep every Omnigent-stamped id loadable regardless of
+# the current routing decision.
+
+
+def test_stale_alias_login_routing_defines_both_omnigent_ids() -> None:
+    """CLI-login routing (no provider tables) aliases both Omnigent ids.
+
+    The observed bug: a gateway-created thread (rollout provider
+    ``omnigent_provider``) resumed while the subscription credential is
+    default. The subscription launch pins ``model_provider="openai"`` but
+    defines no ``omnigent_provider`` table, so thread preload fails.
+    Both ids must resolve through Codex's own stored login
+    (``requires_openai_auth``).
+    """
+    aliases = _stale_provider_alias_overrides(['model_provider="openai"'])
+
+    joined = "\n".join(aliases)
+    assert "model_providers.omnigent_provider={" in joined
+    assert "model_providers.omnigent_databricks={" in joined
+    assert joined.count("requires_openai_auth=true") == 2
+
+
+def test_stale_alias_gateway_routing_maps_databricks_id_to_gateway_table() -> None:
+    """Gateway routing aliases the Databricks id to the gateway table.
+
+    A thread created under a Databricks profile (rollout provider
+    ``omnigent_databricks``) resumed under a gateway default must load —
+    and route through the gateway credential, not a login that may not
+    exist. The already-defined ``omnigent_provider`` must not be
+    redefined.
+    """
+    overrides = _provider_codex_config_overrides(
+        model="gpt-5.5",
+        base_url="https://litellm.example/v1",
+        auth_command="printf %s sk-gw",
+        wire_api="responses",
+    )
+
+    aliases = _stale_provider_alias_overrides(overrides)
+
+    assert len(aliases) == 1
+    (alias,) = aliases
+    assert alias.startswith("model_providers.omnigent_databricks=")
+    assert 'base_url="https://litellm.example/v1"' in alias
+    assert "printf %s sk-gw" in alias
+
+
+def test_stale_alias_databricks_routing_maps_generic_id_to_databricks_table() -> None:
+    """Databricks routing aliases the generic id to the Databricks table."""
+    overrides = _databricks_codex_config_overrides(
+        model="databricks-gpt-5-5",
+        base_url="https://example.databricks.com/ai-gateway/codex/v1",
+        auth_command="databricks auth token",
+    )
+
+    aliases = _stale_provider_alias_overrides(overrides)
+
+    assert len(aliases) == 1
+    (alias,) = aliases
+    assert alias.startswith("model_providers.omnigent_provider=")
+    assert 'base_url="https://example.databricks.com/ai-gateway/codex/v1"' in alias

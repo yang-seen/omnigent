@@ -1058,6 +1058,68 @@ async def trust_native_policy_hooks(client: CodexAppServerClient, *, cwd: str) -
         )
 
 
+# Provider ids Omnigent stamps into Codex rollouts (``session_meta.
+# model_provider``): the generated generic-provider table and the
+# Databricks ucode table. A thread created under one routing decision
+# persists its id; resuming under a different decision must still be
+# able to resolve it at config load.
+_OMNIGENT_CODEX_PROVIDER_IDS = ("omnigent_provider", "omnigent_databricks")
+# Alias body when the current routing carries no provider table of its
+# own (Codex CLI login / subscription): resolve the stale id through
+# Codex's own stored login, exactly like the built-in ``openai``
+# provider (``requires_openai_auth`` selects auth.json credentials).
+_CODEX_LOGIN_ALIAS_TABLE = '{name="OpenAI",requires_openai_auth=true,wire_api="responses"}'
+
+
+def _stale_provider_alias_overrides(config_overrides: list[str]) -> list[str]:
+    """Define Omnigent provider ids the current routing leaves undefined.
+
+    A persisted Codex thread names its ``model_provider`` in the rollout,
+    and ``thread/resume`` fails config load (``Model provider
+    `omnigent_provider` not found``) when that id is not in the launched
+    app-server's provider table — e.g. a thread created while a gateway
+    credential was the Codex default, resumed after the default flipped
+    to the subscription login. The session would be unresumable until the
+    user flips the default back.
+
+    This returns alias ``model_providers.<id>=`` overrides for every
+    Omnigent-stamped id the assembled overrides do not already define,
+    re-mapping stale references to the current routing decision:
+
+    - when the current routing defines its own Omnigent provider table
+      (gateway/key/local → ``omnigent_provider``, Databricks →
+      ``omnigent_databricks``), the alias reuses that table body so a
+      stale id routes through the current credential;
+    - otherwise (Codex CLI login) the alias resolves through Codex's own
+      stored login via ``requires_openai_auth``.
+
+    The reverse direction needs no alias: a thread created under the
+    subscription login references the built-in ``openai`` provider, which
+    Codex always defines.
+
+    :param config_overrides: The assembled ``-c`` overrides for this
+        launch, e.g. ``['model_provider="openai"']``.
+    :returns: Alias override strings to append, possibly empty.
+    """
+    prefix = "model_providers."
+    defined: dict[str, str] = {}
+    for override in config_overrides:
+        if not override.startswith(prefix):
+            continue
+        name, _, table = override.removeprefix(prefix).partition("=")
+        if name and table:
+            defined[name] = table
+    current_table = next(
+        (defined[name] for name in _OMNIGENT_CODEX_PROVIDER_IDS if name in defined),
+        _CODEX_LOGIN_ALIAS_TABLE,
+    )
+    return [
+        f"model_providers.{name}={current_table}"
+        for name in _OMNIGENT_CODEX_PROVIDER_IDS
+        if name not in defined
+    ]
+
+
 def build_codex_native_server(
     *,
     socket_path: Path,
@@ -1134,6 +1196,10 @@ def build_codex_native_server(
         env["DATABRICKS_HOST"] = host
     if extra_config_overrides:
         config_overrides.extend(extra_config_overrides)
+    # Keep threads created under a different credential default resumable:
+    # define every Omnigent-stamped provider id the current routing leaves
+    # undefined, re-mapped to the current routing decision.
+    config_overrides.extend(_stale_provider_alias_overrides(config_overrides))
     if bypass_sandbox:
         # Mirror the --remote TUI's --dangerously-bypass-approvals-and-sandbox
         # on the app-server threads: never prompt for approval, and run
