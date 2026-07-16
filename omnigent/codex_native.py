@@ -11,6 +11,7 @@ import re
 import secrets
 import shutil
 import socket
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ import httpx
 import yaml
 
 from omnigent._native_resume_hint import echo_native_resume_hint
+from omnigent._native_session_workspace import fetch_session_workspace
 from omnigent._runner_startup import RunnerStartupProgress, runner_startup_progress
 from omnigent._wrapper_labels import (
     CODEX_NATIVE_WRAPPER_VALUE as _WRAPPER_LABEL_VALUE,
@@ -393,7 +395,12 @@ def _record_launch_for_fresh_session(session_id: str) -> None:
         )
 
 
-def _align_working_directory_with_session(session_id: str) -> None:
+def _align_working_directory_with_session(
+    session_id: str,
+    *,
+    base_url: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> None:
     """
     Resolve cwd mismatch before resuming a Codex-native session.
 
@@ -403,13 +410,24 @@ def _align_working_directory_with_session(session_id: str) -> None:
     present and points at a different existing directory, ask whether
     to switch there before the runner and app-server sample cwd.
 
+    When no client-side launch state exists (session created by the
+    desktop app or another machine), the server session snapshot's
+    ``workspace`` field is consulted instead so resume does not
+    silently adopt an unrelated cwd.
+
     :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
+    :param base_url: Omnigent server base URL used to fetch the
+        session's ``workspace`` when no local launch state exists,
+        e.g. ``"http://127.0.0.1:6767"``. ``None`` skips the lookup.
+    :param headers: HTTP auth headers for *base_url*. ``None`` is
+        treated as no headers.
     :returns: None. Side-effect-only; may change process cwd.
     :raises click.ClickException: If recorded state exists but no
         viable resume directory exists, or if the user cancels.
     """
     state = read_launch_state(session_id)
     if state is None:
+        _align_with_server_workspace(session_id, base_url=base_url, headers=headers)
         return
     current = Path.cwd().resolve()
     recorded_path = Path(state.working_directory).resolve()
@@ -429,6 +447,63 @@ def _align_working_directory_with_session(session_id: str) -> None:
         _switch_to_recorded_working_directory(recorded_path)
         return
     raise click.ClickException("Resume cancelled.")
+
+
+def _align_with_server_workspace(
+    session_id: str,
+    *,
+    base_url: str | None,
+    headers: dict[str, str] | None,
+) -> None:
+    """
+    Align cwd with the server-recorded session workspace on resume.
+
+    Fallback for resumes with no client-side launch state: sessions
+    created by the desktop app or on another machine. The server
+    session snapshot's ``workspace`` is authoritative there; without
+    this, resume silently launches Codex in whatever directory the
+    CLI happens to run from. Best-effort by design — an unknown
+    workspace or one that does not exist on this machine falls back
+    to the current cwd (with a warning for the latter) so legacy and
+    genuinely cross-filesystem resumes keep working.
+
+    :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
+    :param base_url: Omnigent server base URL, or ``None`` when
+        unavailable (skips the lookup).
+    :param headers: HTTP auth headers for *base_url*, or ``None``.
+    :returns: None. Side-effect-only; may change process cwd and
+        record launch state for subsequent resumes.
+    :raises click.ClickException: If the user cancels the resume.
+    """
+    workspace = fetch_session_workspace(
+        base_url=base_url,
+        headers=headers or {},
+        session_id=session_id,
+    )
+    if workspace is None:
+        return
+    current = Path.cwd().resolve()
+    server_path = Path(workspace).resolve()
+    if current != server_path:
+        if not server_path.is_dir():
+            click.echo(
+                f"Warning: session {session_id} has server workspace {server_path}, "
+                "which does not exist on this machine. Resuming from the current "
+                f"directory ({current}).",
+                err=True,
+            )
+            return
+        if sys.stdin is not None and sys.stdin.isatty():
+            action = _prompt_codex_resume_workspace_action(
+                recorded_path=server_path,
+                current=current,
+            )
+            if action != _RESUME_ACTION_SWITCH:
+                raise click.ClickException("Resume cancelled.")
+        _switch_to_recorded_working_directory(server_path)
+    # Record the resolved workspace so subsequent resumes align without
+    # another server round-trip.
+    _record_launch_for_fresh_session(session_id)
 
 
 def _prompt_codex_resume_workspace_action(
@@ -584,7 +659,11 @@ def _run_with_local_server(
         if resolved_session_id is None and resume_picker and session_id is None:
             return
         if resolved_session_id is not None:
-            _align_working_directory_with_session(resolved_session_id)
+            _align_working_directory_with_session(
+                resolved_session_id,
+                base_url=base_url,
+                headers={},
+            )
 
         async def _drive() -> None:
             """
@@ -673,7 +752,11 @@ def _run_with_remote_server(
         if resolved_session_id is None and resume_picker and session_id is None:
             return
         if resolved_session_id is not None:
-            _align_working_directory_with_session(resolved_session_id)
+            _align_working_directory_with_session(
+                resolved_session_id,
+                base_url=base_url,
+                headers=headers,
+            )
 
         async def _drive() -> None:
             """

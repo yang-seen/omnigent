@@ -47,6 +47,7 @@ from websockets.exceptions import ConnectionClosed, ConnectionClosedError, WebSo
 from websockets.frames import Close
 
 from omnigent._native_resume_hint import echo_native_resume_hint
+from omnigent._native_session_workspace import fetch_session_workspace
 from omnigent._runner_startup import RunnerStartupProgress, runner_startup_progress
 from omnigent._startup_profile import StartupProfiler
 from omnigent._terminal_picker_theme import (
@@ -516,19 +517,18 @@ def _align_working_directory_with_session(
 
     * A user resuming on the same machine they created the session
       on gets the chdir prompt; this is the common path.
-    * A user resuming from a different machine has no recorded
-      state for this conv id locally -- the helper silently
-      proceeds (no prompt) and Claude will likely exit, at which
-      point the user knows to start a fresh session. The wrapper
-      cannot fabricate the cwd; only the original client knew it.
+    * A user resuming from a different machine (or a session created
+      by the desktop app) has no recorded state for this conv id
+      locally -- the helper falls back to the server session
+      snapshot's ``workspace`` field, which the server records at
+      session create.
 
     Decision table:
 
-    - **No state recorded**: silent no-op. Either a legacy session
-      created before this tracking landed, or a session created on
-      a different machine. Echoing a hint here would be noisy on
-      every legacy resume; the user finds out via Claude's own
-      "session not found / cwd mismatch" message if it matters.
+    - **No state recorded**: fall back to the server-recorded
+      ``workspace`` (see :func:`_align_with_server_workspace`).
+      When the server knows no workspace either, silent no-op --
+      a legacy session created before workspace tracking landed.
     - **Recorded cwd matches current cwd**: silent no-op.
     - **Recorded cwd differs, recorded path exists**: offer
       ``switch`` (default), ``move``, or ``leave``. ``switch``
@@ -556,6 +556,7 @@ def _align_working_directory_with_session(
     """
     state = read_launch_state(session_id)
     if state is None:
+        _align_with_server_workspace(session_id, base_url=base_url, headers=headers)
         return
     current = Path.cwd().resolve()
     recorded_path = Path(state.working_directory).resolve()
@@ -581,6 +582,90 @@ def _align_working_directory_with_session(
     )
     if action == _RESUME_ACTION_SWITCH:
         _switch_to_recorded_working_directory(recorded_path)
+        return
+    if action == _RESUME_ACTION_MOVE:
+        if external_session_id is None:
+            raise click.ClickException(
+                "Cannot move Claude transcript: no external session id was found."
+            )
+        _redirect_claude_transcript_to_current_project(
+            session_id=session_id,
+            external_session_id=external_session_id,
+            current=current,
+        )
+        return
+    raise click.ClickException("Resume cancelled.")
+
+
+def _align_with_server_workspace(
+    session_id: str,
+    *,
+    base_url: str | None,
+    headers: dict[str, str] | None,
+) -> None:
+    """
+    Align cwd with the server-recorded session workspace on resume.
+
+    Fallback for resumes with no client-side launch state: sessions
+    created by the desktop app or on another machine. The server
+    session snapshot's ``workspace`` is authoritative there; without
+    this, resume silently samples whatever directory the CLI happens
+    to run from and Claude exits on the cwd mismatch. Best-effort by
+    design -- an unknown workspace, or one that does not exist on
+    this machine with no local transcript to move, falls back to the
+    current cwd (with a warning for the latter) so legacy sessions
+    keep resuming as before.
+
+    :param session_id: Omnigent conversation id, e.g. ``"conv_abc123"``.
+    :param base_url: Omnigent server base URL, or ``None`` when
+        unavailable (skips the lookup).
+    :param headers: HTTP auth headers for *base_url*, or ``None``.
+    :returns: None. Side-effect-only; may change process cwd, move a
+        Claude transcript, and record launch state for subsequent
+        resumes.
+    :raises click.ClickException: If the user leaves, or a chosen
+        move fails.
+    """
+    workspace = fetch_session_workspace(
+        base_url=base_url,
+        headers=headers or {},
+        session_id=session_id,
+    )
+    if workspace is None:
+        return
+    current = Path.cwd().resolve()
+    server_path = Path(workspace).resolve()
+    if current == server_path:
+        _record_launch_for_fresh_session(session_id)
+        return
+    external_session_id = _fetch_external_session_id_for_redirect(
+        base_url=base_url,
+        headers=headers or {},
+        session_id=session_id,
+    )
+    redirect_available = _redirect_available(external_session_id)
+    if not server_path.is_dir():
+        if not redirect_available:
+            click.echo(
+                f"Warning: session {session_id} has server workspace {server_path}, "
+                "which does not exist on this machine. Resuming from the current "
+                f"directory ({current}).",
+                err=True,
+            )
+            return
+    elif not _stream_is_tty(sys.stdin):
+        # Non-interactive resume: prefer the authoritative server workspace.
+        _switch_to_recorded_working_directory(server_path)
+        _record_launch_for_fresh_session(session_id)
+        return
+    action = _prompt_resume_workspace_action(
+        recorded_path=server_path,
+        current=current,
+        redirect_available=redirect_available,
+    )
+    if action == _RESUME_ACTION_SWITCH:
+        _switch_to_recorded_working_directory(server_path)
+        _record_launch_for_fresh_session(session_id)
         return
     if action == _RESUME_ACTION_MOVE:
         if external_session_id is None:

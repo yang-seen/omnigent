@@ -6432,3 +6432,156 @@ def test_tool_use_result_regression_old_flatten_would_crash_resume() -> None:
     )
     assert len(records) == 1
     assert json.loads(records[0]["toolUseResult"]) == output
+
+
+# ── _align_with_server_workspace (no local launch state) ──
+#
+# Sessions created by the desktop app or on another machine have no
+# client-side launch state; the server session snapshot's ``workspace``
+# field is the fallback so resume does not sample an unrelated cwd.
+
+
+def test_align_no_state_switches_to_server_workspace_non_interactive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    No local state + server workspace elsewhere → switch (non-tty).
+
+    Cross-machine / desktop-app sessions carry an authoritative
+    ``workspace`` on the server; without a TTY there is nobody to
+    prompt, so the wrapper switches there and records launch state so
+    the next resume uses the normal recorded-state path.
+    """
+    from omnigent.claude_native_state import read_launch_state
+
+    server_ws = tmp_path / "server-ws"
+    server_ws.mkdir()
+    current = tmp_path / "current"
+    current.mkdir()
+    monkeypatch.chdir(current)
+    monkeypatch.setattr(
+        claude_native,
+        "fetch_session_workspace",
+        lambda **_kwargs: str(server_ws),
+    )
+    monkeypatch.setattr(
+        claude_native,
+        "_fetch_external_session_id_for_redirect",
+        lambda **_kwargs: None,
+    )
+
+    claude_native._align_working_directory_with_session(
+        "conv_remote_ws",
+        base_url="http://ap.example",
+        headers={},
+    )
+
+    assert Path.cwd().resolve() == server_ws.resolve()
+    state = read_launch_state("conv_remote_ws")
+    assert state is not None
+    assert state.working_directory == str(server_ws.resolve())
+
+
+def test_align_no_state_interactive_leave_cancels(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    No local state + server workspace elsewhere → prompt on a TTY;
+    ``leave`` cancels before Claude can crash on the cwd mismatch.
+    """
+    server_ws = tmp_path / "server-ws"
+    server_ws.mkdir()
+    current = tmp_path / "current"
+    current.mkdir()
+    monkeypatch.chdir(current)
+    monkeypatch.setattr(
+        claude_native,
+        "fetch_session_workspace",
+        lambda **_kwargs: str(server_ws),
+    )
+    monkeypatch.setattr(
+        claude_native,
+        "_fetch_external_session_id_for_redirect",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(claude_native, "_stream_is_tty", lambda _stream: True)
+    monkeypatch.setattr(
+        claude_native,
+        "_prompt_resume_workspace_action",
+        lambda **_kwargs: claude_native._RESUME_ACTION_LEAVE,
+    )
+
+    with pytest.raises(click.ClickException, match="cancelled"):
+        claude_native._align_working_directory_with_session(
+            "conv_remote_ws", base_url="http://ap.example", headers={}
+        )
+
+    assert Path.cwd().resolve() == current.resolve()
+
+
+def test_align_no_state_missing_server_workspace_warns_and_proceeds(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """
+    Server workspace absent locally + no transcript to move → warn,
+    keep the current cwd (the pre-fallback behavior), record nothing.
+    """
+    from omnigent.claude_native_state import read_launch_state
+
+    current = tmp_path / "current"
+    current.mkdir()
+    monkeypatch.chdir(current)
+    missing = tmp_path / "not-here"
+    monkeypatch.setattr(
+        claude_native,
+        "fetch_session_workspace",
+        lambda **_kwargs: str(missing),
+    )
+    monkeypatch.setattr(
+        claude_native,
+        "_fetch_external_session_id_for_redirect",
+        lambda **_kwargs: None,
+    )
+
+    claude_native._align_working_directory_with_session(
+        "conv_remote_ws", base_url="http://ap.example", headers={}
+    )
+
+    assert Path.cwd().resolve() == current.resolve()
+    assert read_launch_state("conv_remote_ws") is None
+    assert "does not exist on this machine" in capsys.readouterr().err
+
+
+def test_align_no_state_matching_server_workspace_records_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    Server workspace equal to cwd → no prompt, launch state recorded
+    so subsequent resumes skip the server round-trip.
+    """
+    from omnigent.claude_native_state import read_launch_state
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        claude_native,
+        "fetch_session_workspace",
+        lambda **_kwargs: str(tmp_path),
+    )
+
+    def fail_prompt(**_kwargs: object) -> str:
+        raise AssertionError("matching server workspace should not prompt")
+
+    monkeypatch.setattr(claude_native, "_prompt_resume_workspace_action", fail_prompt)
+
+    claude_native._align_working_directory_with_session(
+        "conv_remote_ws", base_url="http://ap.example", headers={}
+    )
+
+    state = read_launch_state("conv_remote_ws")
+    assert state is not None
+    assert state.working_directory == str(tmp_path.resolve())

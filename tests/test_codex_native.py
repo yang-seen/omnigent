@@ -6790,11 +6790,12 @@ def test_run_with_remote_server_aligns_cwd_before_daemon_prepare(
         lambda **_kwargs: "conv_abc",
     )
 
-    def fake_align_working_directory(_session_id: str) -> None:
+    def fake_align_working_directory(_session_id: str, **_kwargs: object) -> None:
         """
         Simulate resume alignment changing the process cwd.
 
         :param _session_id: Session id being aligned.
+        :param _kwargs: Server coordinates (``base_url`` / ``headers``).
         :returns: None.
         """
         order.append("align")
@@ -9688,3 +9689,185 @@ def test_rollout_records_without_compaction_item_has_no_compacted_entry() -> Non
     )
     types = [r["type"] for r in records]
     assert "compacted" not in types
+
+
+# ── _align_with_server_workspace (no local launch state) ──
+#
+# Sessions created by the desktop app or on another machine have no
+# client-side launch state, so resume used to silently adopt the CLI's
+# current cwd and launch Codex in an unrelated repo. The server session
+# snapshot's ``workspace`` field is authoritative for those sessions.
+
+
+def test_align_no_state_switches_to_server_workspace_non_interactive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    No local state + server workspace elsewhere → switch (non-tty).
+
+    The reported bug: a session with server
+    ``workspace=/…/yang-ai-elements-message`` resumed from a different
+    repo launched the Codex terminal with the unrelated repo's cwd.
+    Without a TTY there is nobody to prompt, so the authoritative
+    server workspace wins — and is recorded client-side so the next
+    resume aligns without a server round-trip.
+    """
+    from omnigent.codex_native_state import read_launch_state
+
+    server_ws = tmp_path / "server-ws"
+    server_ws.mkdir()
+    current = tmp_path / "current"
+    current.mkdir()
+    monkeypatch.chdir(current)
+    monkeypatch.setenv("OMNIGENT_CODEX_NATIVE_STATE_DIR", str(tmp_path / "state"))
+    fetch_calls: list[dict[str, object]] = []
+
+    def fake_fetch(
+        *, base_url: str | None, headers: dict[str, str], session_id: str
+    ) -> str | None:
+        fetch_calls.append({"base_url": base_url, "headers": headers, "session_id": session_id})
+        return str(server_ws)
+
+    monkeypatch.setattr(codex_native, "fetch_session_workspace", fake_fetch)
+
+    codex_native._align_working_directory_with_session(
+        "conv_remote",
+        base_url="http://ap.example",
+        headers={"Authorization": "Bearer t"},
+    )
+
+    assert fetch_calls == [
+        {
+            "base_url": "http://ap.example",
+            "headers": {"Authorization": "Bearer t"},
+            "session_id": "conv_remote",
+        }
+    ]
+    assert Path.cwd().resolve() == server_ws.resolve()
+    state = read_launch_state("conv_remote")
+    assert state is not None
+    assert state.working_directory == str(server_ws.resolve())
+
+
+def test_align_no_state_prompts_when_interactive(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    No local state + server workspace elsewhere → prompt on a TTY.
+
+    Interactive resumes keep the same switch/cancel UX as the
+    recorded-state path; cancel aborts before the runner samples cwd.
+    """
+    server_ws = tmp_path / "server-ws"
+    server_ws.mkdir()
+    current = tmp_path / "current"
+    current.mkdir()
+    monkeypatch.chdir(current)
+    monkeypatch.setenv("OMNIGENT_CODEX_NATIVE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(
+        codex_native,
+        "fetch_session_workspace",
+        lambda **_kwargs: str(server_ws),
+    )
+    monkeypatch.setattr(codex_native.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(
+        codex_native,
+        "_prompt_codex_resume_workspace_action",
+        lambda **_kwargs: "cancel",
+    )
+
+    with pytest.raises(click.ClickException, match="cancelled"):
+        codex_native._align_working_directory_with_session(
+            "conv_remote", base_url="http://ap.example", headers={}
+        )
+
+    assert Path.cwd().resolve() == current.resolve()
+
+
+def test_align_no_state_missing_server_workspace_warns_and_proceeds(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """
+    Server workspace absent on this machine → warn, keep current cwd.
+
+    A genuinely cross-filesystem resume (path exists only on the other
+    machine) must fall back to the old behavior instead of failing, and
+    must not record misleading launch state.
+    """
+    from omnigent.codex_native_state import read_launch_state
+
+    current = tmp_path / "current"
+    current.mkdir()
+    monkeypatch.chdir(current)
+    monkeypatch.setenv("OMNIGENT_CODEX_NATIVE_STATE_DIR", str(tmp_path / "state"))
+    missing = tmp_path / "not-here"
+    monkeypatch.setattr(
+        codex_native,
+        "fetch_session_workspace",
+        lambda **_kwargs: str(missing),
+    )
+
+    codex_native._align_working_directory_with_session(
+        "conv_remote", base_url="http://ap.example", headers={}
+    )
+
+    assert Path.cwd().resolve() == current.resolve()
+    assert read_launch_state("conv_remote") is None
+    assert "does not exist on this machine" in capsys.readouterr().err
+
+
+def test_align_no_state_unknown_server_workspace_is_noop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    Neither local state nor a server workspace → legacy silent no-op.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OMNIGENT_CODEX_NATIVE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(codex_native, "fetch_session_workspace", lambda **_kwargs: None)
+
+    codex_native._align_working_directory_with_session(
+        "conv_legacy", base_url="http://ap.example", headers={}
+    )
+
+    assert Path.cwd().resolve() == tmp_path.resolve()
+
+
+def test_align_no_state_matching_server_workspace_records_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """
+    Server workspace equal to cwd → no prompt, launch state recorded.
+
+    Recording on the match path makes subsequent resumes consistent
+    (recorded-state path, no server round-trip) even when the session
+    was created elsewhere.
+    """
+    from omnigent.codex_native_state import read_launch_state
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("OMNIGENT_CODEX_NATIVE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(
+        codex_native,
+        "fetch_session_workspace",
+        lambda **_kwargs: str(tmp_path),
+    )
+
+    def fail_prompt(**_kwargs: object) -> str:
+        raise AssertionError("matching server workspace should not prompt")
+
+    monkeypatch.setattr(codex_native, "_prompt_codex_resume_workspace_action", fail_prompt)
+
+    codex_native._align_working_directory_with_session(
+        "conv_remote", base_url="http://ap.example", headers={}
+    )
+
+    state = read_launch_state("conv_remote")
+    assert state is not None
+    assert state.working_directory == str(tmp_path.resolve())
