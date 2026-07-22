@@ -277,6 +277,7 @@ def build_app(resolved_config: _ResolvedConfig | None = None) -> _BuiltApp:
     from omnigent.runtime.agent_cache import AgentCache
     from omnigent.runtime.caps import RuntimeCaps
     from omnigent.server.managed_hosts import parse_sandbox_config
+    from omnigent.spec import parse_default_policies, parse_server_llm
     from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
     from omnigent.stores.comment_store.sqlalchemy_store import (
         SqlAlchemyCommentStore,
@@ -301,8 +302,8 @@ def build_app(resolved_config: _ResolvedConfig | None = None) -> _BuiltApp:
     conversation_store = SqlAlchemyConversationStore(database_url)
     comment_store = SqlAlchemyCommentStore(database_url)
     permission_store = SqlAlchemyPermissionStore(database_url)
-    host_store = HostStore(database_url)
     policy_store = SqlAlchemyPolicyStore(database_url)
+    host_store = HostStore(database_url)
     scheduled_task_store = SqlAlchemyScheduledTaskStore(database_url)
     # Fail startup loud on a malformed `sandbox:` section (an operator
     # typo should not surface as a runtime 502 on the first managed
@@ -317,7 +318,14 @@ def build_app(resolved_config: _ResolvedConfig | None = None) -> _BuiltApp:
 
     init_runtime(
         agent_cache=agent_cache,
-        caps=RuntimeCaps(),
+        caps=RuntimeCaps(
+            # Server-wide default policies from the YAML `policies:` block,
+            # matching the CLI `omnigent server` path (omnigent/cli.py). Both
+            # entrypoints read the same config key, and these merge with the
+            # API-backed store defaults in the policy builder.
+            default_policies=parse_default_policies(cfg.get("policies")),
+            llm=parse_server_llm(cfg.get("llm")),
+        ),
         agent_store=agent_store,
         file_store=file_store,
         conversation_store=conversation_store,
@@ -349,12 +357,13 @@ def build_app(resolved_config: _ResolvedConfig | None = None) -> _BuiltApp:
         artifact_store=artifact_store,
         agent_cache=agent_cache,
         comment_store=comment_store,
-        permission_store=permission_store,
         policy_store=policy_store,
+        permission_store=permission_store,
         host_store=host_store,
         scheduled_task_store=scheduled_task_store,
         auth_provider=auth_provider,
         account_store=account_store,
+        policy_modules=cfg.get("policy_modules"),
         # Non-secret auth settings from the config file (admins are the
         # canonical, declarative roster; allowed_domains gates OIDC). Both
         # union with their runtime-editable files under <data_dir>.
